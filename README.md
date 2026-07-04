@@ -15,7 +15,7 @@ Local OMP extension that exposes OpenAI Codex Computer Use through `codex app-se
 ```bash
 bun install
 bun run check
-omp-dev -e /Volumes/ExtraDisk/Dev/omp-codex-computer
+omp-dev -e .
 ```
 
 Inside OMP:

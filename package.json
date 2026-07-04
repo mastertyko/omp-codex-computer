@@ -10,9 +10,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "sh -c 'if find src tests -name \"*.ts\" -print -quit 2>/dev/null | grep -q .; then tsc --noEmit; else echo \"No TypeScript files yet; skipping typecheck\"; fi'",
     "check": "bun run typecheck && bun run test"
   },
   "keywords": [
