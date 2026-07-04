@@ -56,35 +56,53 @@ export class AppServerClient {
 
     child.on("error", (error) => {
       logDebug("app-server.error", { message: error.message });
-      this.rejectAll(error);
+      this.cleanupCurrentChild(child, error);
     });
     child.on("exit", (code, signal) => {
       logDebug("app-server.exit", { code, signal });
-      this.rejectAll(new Error(`Codex app-server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`));
-      this.process = undefined;
-      this.stdout?.close();
-      this.stdout = undefined;
+      this.cleanupCurrentChild(
+        child,
+        new Error(`Codex app-server exited (code=${code ?? "null"}, signal=${signal ?? "null"})`),
+      );
     });
   }
 
   async stop(): Promise<void> {
     const child = this.process;
-    this.process = undefined;
-    this.stdout?.close();
-    this.stdout = undefined;
+    this.rejectAll(new Error("Codex app-server stopped"));
 
-    if (!child || child.exitCode !== null) return;
+    if (!child) return;
+
+    if (child.exitCode !== null) {
+      this.cleanupCurrentChild(child);
+      return;
+    }
 
     await new Promise<void>((resolve) => {
-      const done = () => resolve();
+      let resolved = false;
+      let safetyTimer: NodeJS.Timeout | undefined;
+
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(killTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        child.off("exit", onExit);
+        resolve();
+      };
+
+      const onExit = () => {
+        done();
+      };
+
       const killTimer = setTimeout(() => {
         child.kill("SIGKILL");
-        done();
+        safetyTimer = setTimeout(() => {
+          this.cleanupCurrentChild(child);
+          done();
+        }, 250);
       }, 1000);
-      child.once("exit", () => {
-        clearTimeout(killTimer);
-        done();
-      });
+      child.once("exit", onExit);
       child.kill("SIGTERM");
     });
   }
@@ -109,6 +127,7 @@ export class AppServerClient {
 
     const id = this.nextId++;
     const message: AppServerRequest = params === undefined ? { id, method } : { id, method, params };
+    const payload = `${JSON.stringify(message)}\n`;
 
     return new Promise<TResult>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -122,7 +141,7 @@ export class AppServerClient {
         timer,
       });
 
-      child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+      child.stdin.write(payload, (error) => {
         if (!error) return;
         clearTimeout(timer);
         this.pending.delete(id);
@@ -137,7 +156,7 @@ export class AppServerClient {
       message = JSON.parse(line);
     } catch {
       if (process.env.OMP_CODEX_COMPUTER_DEBUG === "1") {
-        process.stderr.write(`[codex-app-server:invalid-json] ${line}\n`);
+        process.stderr.write("[codex-app-server:invalid-json] ignored malformed JSON line\n");
       }
       return;
     }
@@ -202,6 +221,16 @@ export class AppServerClient {
 
   private sendServerRequestError(id: RequestId, error: { code: number; message: string; data?: unknown }): void {
     this.process?.stdin.write(`${JSON.stringify({ id, error })}\n`);
+  }
+
+  private cleanupCurrentChild(child: ChildProcessWithoutNullStreams, error?: Error): void {
+    if (this.process !== child) return;
+
+    this.stdout?.close();
+    this.stdout = undefined;
+    this.process = undefined;
+
+    if (error) this.rejectAll(error);
   }
 
   private rejectAll(error: Error): void {
