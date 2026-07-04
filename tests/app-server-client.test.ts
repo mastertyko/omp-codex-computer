@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
-import { AppServerClient } from "../src/app-server-client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AppServerClient, type ServerRequestResponder } from "../src/app-server-client";
 
 const spawnMockState = vi.hoisted(() => ({
   child: undefined as unknown,
@@ -67,10 +67,22 @@ function pendingCount(client: AppServerClient) {
 }
 
 function deliver(client: AppServerClient, message: unknown) {
-  (client as unknown as { handleLine(line: string): void }).handleLine(JSON.stringify(message));
+  const child = (client as unknown as { process: unknown }).process;
+  (client as unknown as { handleLine(child: unknown, line: string): void }).handleLine(child, JSON.stringify(message));
+}
+
+async function deliverFromChild(child: { stdout: PassThrough }, message: unknown) {
+  child.stdout.write(`${JSON.stringify(message)}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("AppServerClient", () => {
+  afterEach(() => {
+    spawnMockState.child = undefined;
+    vi.restoreAllMocks();
+    delete process.env.OMP_CODEX_COMPUTER_DEBUG;
+  });
+
   it("routes concurrent responses by id", async () => {
     const client = new AppServerClient();
     attachFakeProcess(client);
@@ -135,6 +147,32 @@ describe("AppServerClient", () => {
     expect(response.error.message).toContain("No handler");
   });
 
+  it("does not write a stale server-request response to a restarted child", async () => {
+    const client = new AppServerClient();
+    const first = startWithFakeProcess(client);
+    let responder: ServerRequestResponder | undefined;
+
+    client.onServerRequest((_request, capturedResponder) => {
+      responder = capturedResponder;
+    });
+
+    await deliverFromChild(first.child, { id: "old-request", method: "mcpServer/elicitation/request", params: {} });
+    expect(responder).toBeDefined();
+
+    first.child.exitCode = 1;
+    first.child.emit("exit", 1, null);
+
+    const second = createFakeProcess();
+    spawnMockState.child = second.child;
+    client.start();
+
+    responder?.accept({ action: "accept", content: { stale: true } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(second.writes.join("")).not.toContain("old-request");
+    expect(second.writes.join("")).not.toContain("stale");
+  });
+
   it("rejects a pending request promptly when stopped", async () => {
     const client = new AppServerClient({ requestTimeoutMs: 1000 });
     attachFakeProcess(client);
@@ -144,6 +182,36 @@ describe("AppServerClient", () => {
     await client.stop();
 
     await rejection;
+  });
+
+  it("does not write new requests to a child after stop has begun", async () => {
+    const client = new AppServerClient();
+    const stopping = startWithFakeProcess(client);
+    const stopPromise = client.stop();
+    const fresh = createFakeProcess();
+    spawnMockState.child = fresh.child;
+
+    const request = client.request("after-stop", {}, 1000);
+
+    expect(stopping.writes).toHaveLength(0);
+    expect(fresh.writes).toHaveLength(1);
+
+    await deliverFromChild(fresh.child, { id: 1, result: "fresh" });
+    await expect(request).resolves.toBe("fresh");
+    await stopPromise;
+  });
+
+  it("summarizes debug stderr without forwarding raw stderr", async () => {
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.env.OMP_CODEX_COMPUTER_DEBUG = "1";
+    const client = new AppServerClient();
+    const { child } = startWithFakeProcess(client);
+    const rawChunk = "secret app-server stderr\n";
+
+    child.stderr.write(rawChunk);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(stderrWrite).not.toHaveBeenCalledWith(expect.stringContaining(rawChunk));
   });
 
   it("clears running process state after child error", () => {

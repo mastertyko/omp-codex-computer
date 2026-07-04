@@ -46,11 +46,11 @@ export class AppServerClient {
 
     this.process = child;
     this.stdout = createInterface({ input: child.stdout });
-    this.stdout.on("line", (line) => this.handleLine(line));
+    this.stdout.on("line", (line) => this.handleLine(child, line));
 
     child.stderr.on("data", (chunk) => {
       if (process.env.OMP_CODEX_COMPUTER_DEBUG === "1") {
-        process.stderr.write(`[codex-app-server] ${String(chunk)}`);
+        logDebug("app-server.stderr", { bytes: Buffer.byteLength(String(chunk)) });
       }
     });
 
@@ -72,9 +72,9 @@ export class AppServerClient {
     this.rejectAll(new Error("Codex app-server stopped"));
 
     if (!child) return;
+    this.detachCurrentChild(child);
 
     if (child.exitCode !== null) {
-      this.cleanupCurrentChild(child);
       return;
     }
 
@@ -150,7 +150,9 @@ export class AppServerClient {
     });
   }
 
-  private handleLine(line: string): void {
+  private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.process !== child) return;
+
     let message: unknown;
     try {
       message = JSON.parse(line);
@@ -165,7 +167,7 @@ export class AppServerClient {
     const object = message as Record<string, unknown>;
 
     if ("id" in object && typeof object.method === "string") {
-      void this.handleServerRequest(object as unknown as AppServerRequest);
+      void this.handleServerRequest(child, object as unknown as AppServerRequest);
       return;
     }
 
@@ -195,42 +197,57 @@ export class AppServerClient {
     pending.resolve(response.result);
   }
 
-  private async handleServerRequest(request: AppServerRequest): Promise<void> {
+  private async handleServerRequest(child: ChildProcessWithoutNullStreams, request: AppServerRequest): Promise<void> {
     const handler = this.serverRequestHandler;
     if (!handler) {
-      this.sendServerRequestError(request.id, { code: -32601, message: `No handler for server request ${request.method}` });
+      this.sendServerRequestError(child, request.id, {
+        code: -32601,
+        message: `No handler for server request ${request.method}`,
+      });
       return;
     }
 
     try {
       await handler(request, {
-        accept: (result) => this.sendServerRequestResult(request.id, result),
-        reject: (error) => this.sendServerRequestError(request.id, error),
+        accept: (result) => this.sendServerRequestResult(child, request.id, result),
+        reject: (error) => this.sendServerRequestError(child, request.id, error),
       });
     } catch (error) {
-      this.sendServerRequestError(request.id, {
+      this.sendServerRequestError(child, request.id, {
         code: -32603,
         message: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
-  private sendServerRequestResult(id: RequestId, result: unknown): void {
-    this.process?.stdin.write(`${JSON.stringify({ id, result })}\n`);
+  private sendServerRequestResult(child: ChildProcessWithoutNullStreams, id: RequestId, result: unknown): void {
+    if (this.process !== child) return;
+    child.stdin.write(`${JSON.stringify({ id, result })}\n`);
   }
 
-  private sendServerRequestError(id: RequestId, error: { code: number; message: string; data?: unknown }): void {
-    this.process?.stdin.write(`${JSON.stringify({ id, error })}\n`);
+  private sendServerRequestError(
+    child: ChildProcessWithoutNullStreams,
+    id: RequestId,
+    error: { code: number; message: string; data?: unknown },
+  ): void {
+    if (this.process !== child) return;
+    child.stdin.write(`${JSON.stringify({ id, error })}\n`);
   }
 
   private cleanupCurrentChild(child: ChildProcessWithoutNullStreams, error?: Error): void {
     if (this.process !== child) return;
 
+    this.detachCurrentChild(child);
+
+    if (error) this.rejectAll(error);
+  }
+
+  private detachCurrentChild(child: ChildProcessWithoutNullStreams): void {
+    if (this.process !== child) return;
+
     this.stdout?.close();
     this.stdout = undefined;
     this.process = undefined;
-
-    if (error) this.rejectAll(error);
   }
 
   private rejectAll(error: Error): void {
