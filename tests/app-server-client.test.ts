@@ -116,9 +116,13 @@ describe("AppServerClient", () => {
 
   it("ignores malformed JSON", () => {
     const client = new AppServerClient();
-    attachFakeProcess(client);
+    const { child, writes } = startWithFakeProcess(client);
 
-    expect(() => (client as unknown as { handleLine(line: string): void }).handleLine("not json")).not.toThrow();
+    expect(() =>
+      (client as unknown as { handleLine(child: unknown, line: string): void }).handleLine(child, "not json"),
+    ).not.toThrow();
+    expect(pendingCount(client)).toBe(0);
+    expect(writes).toHaveLength(0);
   });
 
   it("handles app-server requests through registered handler", async () => {
