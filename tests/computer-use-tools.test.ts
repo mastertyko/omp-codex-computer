@@ -18,6 +18,12 @@ function createContext() {
   return { cwd: "/tmp/project", hasUI: false };
 }
 
+function getRegisteredTool(pi: ReturnType<typeof createFakePi>, name: string) {
+  const tool = pi.tools.find((entry) => (entry as { name: string }).name === name);
+  if (!tool) throw new Error(`missing tool ${name}`);
+  return tool as { parameters: { safeParse: (value: unknown) => { success: boolean } } };
+}
+
 describe("registerComputerUseTools", () => {
   it("registers the Computer Use tools in the public order", () => {
     const pi = createFakePi();
@@ -76,5 +82,26 @@ describe("registerComputerUseTools", () => {
       },
     });
     expect(JSON.stringify((result as { details: unknown }).details)).not.toContain("secret");
+  });
+
+  it("registers specific parameter schemas for model-visible tool arguments", () => {
+    const pi = createFakePi();
+    const runtime = { callTool: vi.fn() } as unknown as ComputerUseRuntime;
+    registerComputerUseTools(pi as never, runtime);
+
+    expect(getRegisteredTool(pi, "computer_use_list_apps").parameters.safeParse({}).success).toBe(true);
+
+    const getAppState = getRegisteredTool(pi, "computer_use_get_app_state").parameters;
+    expect(getAppState.safeParse({}).success).toBe(false);
+    expect(getAppState.safeParse({ app: "Finder" }).success).toBe(true);
+
+    const typeText = getRegisteredTool(pi, "computer_use_type_text").parameters;
+    expect(typeText.safeParse({ app: "Finder" }).success).toBe(false);
+    expect(typeText.safeParse({ app: "Finder", text: "hello" }).success).toBe(true);
+
+    const click = getRegisteredTool(pi, "computer_use_click").parameters;
+    expect(click.safeParse({ element_index: "1" }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", element_index: "1" }).success).toBe(true);
+    expect(click.safeParse({ app: "Finder", x: 12, y: 34 }).success).toBe(true);
   });
 });

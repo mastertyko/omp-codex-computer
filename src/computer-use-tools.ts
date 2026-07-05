@@ -96,14 +96,14 @@ const COMPUTER_USE_TOOLS = [
 }>;
 
 export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseRuntime): void {
-  const parameters = pi.zod.object({}).catchall(pi.zod.unknown());
+  const parametersByTool = createParameterSchemas(pi);
 
   for (const tool of COMPUTER_USE_TOOLS) {
     const definition = {
       name: tool.name,
       label: tool.label,
       description: tool.description,
-      parameters,
+      parameters: parametersByTool[tool.name],
       defaultInactive: true,
       approval: tool.approval,
       mcpServerName: "computer-use",
@@ -124,6 +124,66 @@ export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseR
     };
     pi.registerTool(definition as Parameters<ExtensionAPI["registerTool"]>[0]);
   }
+}
+
+function createParameterSchemas(pi: ExtensionAPI): Record<(typeof COMPUTER_USE_TOOL_NAMES)[number], unknown> {
+  const z = pi.zod;
+  const app = z.string().describe("The application to inspect or control.");
+  const elementIndex = z.string().describe("The target element index from the app state.");
+
+  return {
+    computer_use_list_apps: z.object({}),
+    computer_use_get_app_state: z.object({
+      app,
+    }).passthrough(),
+    computer_use_click: z.object({
+      app,
+      element_index: elementIndex.optional(),
+      x: z.number().describe("The x coordinate to click.").optional(),
+      y: z.number().describe("The y coordinate to click.").optional(),
+      click_count: z.number().describe("The number of clicks to perform.").optional(),
+      mouse_button: z.enum(["left", "right", "middle"]).describe("The mouse button to click.").optional(),
+    }).passthrough(),
+    computer_use_type_text: z.object({
+      app,
+      text: z.string().describe("The text to type."),
+    }).passthrough(),
+    computer_use_press_key: z.object({
+      app,
+      key: z.string().describe("The key or keyboard shortcut to press."),
+    }).passthrough(),
+    computer_use_scroll: z.object({
+      app,
+      element_index: elementIndex,
+      direction: z.enum(["up", "down", "left", "right"]).describe("The scroll direction."),
+      pages: z.number().describe("The number of pages to scroll.").optional(),
+    }).passthrough(),
+    computer_use_drag: z.object({
+      app,
+      from_x: z.number().describe("The drag start x coordinate."),
+      from_y: z.number().describe("The drag start y coordinate."),
+      to_x: z.number().describe("The drag end x coordinate."),
+      to_y: z.number().describe("The drag end y coordinate."),
+    }).passthrough(),
+    computer_use_set_value: z.object({
+      app,
+      element_index: elementIndex,
+      value: z.string().describe("The value to set."),
+    }).passthrough(),
+    computer_use_select_text: z.object({
+      app,
+      element_index: elementIndex,
+      text: z.string().describe("The text to select."),
+      selection: z.enum(["text", "cursor_before", "cursor_after"]).describe("The selection behavior.").optional(),
+      prefix: z.string().describe("Text before the target selection.").optional(),
+      suffix: z.string().describe("Text after the target selection.").optional(),
+    }).passthrough(),
+    computer_use_perform_secondary_action: z.object({
+      app,
+      element_index: elementIndex,
+      action: z.string().describe("The secondary action to perform."),
+    }).passthrough(),
+  };
 }
 
 interface ComputerUseToolSummary {
