@@ -31,7 +31,7 @@ export function convertCodexContentToOmpContent(
   const blocks: OmpContentBlock[] = [];
   for (const raw of content) {
     if (!raw || typeof raw !== "object") {
-      blocks.push({ type: "text", text: String(raw) });
+      blocks.push({ type: "text", text: truncateText(String(raw), options) });
       continue;
     }
 

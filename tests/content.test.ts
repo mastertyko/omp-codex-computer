@@ -64,6 +64,20 @@ describe("convertCodexContentToOmpContent", () => {
     }
   });
 
+  it("truncates primitive array items within the configured byte budget", () => {
+    const maxBytes = 32;
+    const result = convertCodexContentToOmpContent(["a".repeat(100)], {
+      maxBytes,
+      maxLines: 100,
+    });
+
+    expect(result[0]).toMatchObject({ type: "text" });
+    if (result[0]?.type === "text") {
+      expect(result[0].text).toContain("truncated");
+      expect(Buffer.byteLength(result[0].text, "utf8")).toBeLessThanOrEqual(maxBytes);
+    }
+  });
+
   it("trims multibyte unicode without exceeding the byte budget", () => {
     const maxBytes = 36;
     const result = convertCodexContentToOmpContent([{ type: "text", text: "å🙂".repeat(100) }], {
