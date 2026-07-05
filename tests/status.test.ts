@@ -181,15 +181,28 @@ describe("evaluateComputerUseStatus", () => {
     expect(status.missingToolNames).toBeUndefined();
   });
 
-  it("allows extra MCP tools once every required tool is present", () => {
+  it("keeps ready status and surfaces extra MCP tools separately", () => {
     const status = evaluateComputerUseStatus({
       codexAppExists: true,
       appServer,
       plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
       mcp: mcp([...REQUIRED_MCP_TOOL_NAMES, "debug_tool"]),
     });
-    expect(status.reason).toBe("ready");
+    expect(status).toMatchObject({ reason: "ready", extraToolNames: ["debug_tool"] });
     expect(status.mcpServer?.toolNames).toEqual([...REQUIRED_MCP_TOOL_NAMES, "debug_tool"].sort());
+    expect(status.missingToolNames).toBeUndefined();
+  });
+  
+  it("formats additional upstream MCP tools not exposed by the adapter on a dedicated line", () => {
+    const text = formatComputerUseStatus(evaluateComputerUseStatus({
+      codexAppExists: true,
+      appServer,
+      plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
+      mcp: mcp([...REQUIRED_MCP_TOOL_NAMES, "debug_tool"]),
+    }));
+    expect(text).toContain("Computer Use status: ready");
+    expect(text).toContain("MCP tools: click, debug_tool, drag, get_app_state, list_apps, perform_secondary_action, press_key, scroll, select_text, set_value, type_text");
+    expect(text).toContain("Additional upstream MCP tools not exposed by adapter: debug_tool");
   });
 
   it("reports mcp_incomplete with missing tool names for partial MCP exposure", () => {

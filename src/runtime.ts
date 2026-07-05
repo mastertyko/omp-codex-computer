@@ -8,6 +8,7 @@ import { CodexThreadManager } from "./thread-manager";
 
 const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
 const COMPUTER_STATUS_KEY = "codex-computer";
+const COMPUTER_STATUS_LABEL = "Codex 💻";
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 const PERMISSION_FALLBACK_MESSAGE = "Codex requests permission to continue.";
 
@@ -41,7 +42,7 @@ export class ComputerUseRuntime {
     this.initializePromise = undefined;
     this.threads.reset();
     await this.client.stop();
-    this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "idle");
+    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "idle");
   }
 
   async initialize(): Promise<InitializeResponse> {
@@ -78,15 +79,15 @@ export class ComputerUseRuntime {
   ): Promise<ComputerUseToolResult> {
     this.setContext(ctx);
     this.clearIdleTimer();
-    this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", typeof args.app === "string" ? `working: ${args.app}` : "working");
+    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, typeof args.app === "string" ? `working: ${args.app}` : "working");
 
     try {
       await this.initialize();
       const result = await this.backend.callTool(ctx.cwd, tool, args);
-      this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "ready");
+      this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "ready");
       return result;
     } catch (error) {
-      this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "error");
+      this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "error");
       throw error;
     } finally {
       this.scheduleIdleShutdown();
@@ -108,7 +109,7 @@ export class ComputerUseRuntime {
 
     const params = getElicitationParams(request.params);
     const message = params.message ?? PERMISSION_FALLBACK_MESSAGE;
-    this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "permission");
+    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "permission");
     logDebug("elicitation.request", {
       method: request.method,
       serverName: params.serverName,

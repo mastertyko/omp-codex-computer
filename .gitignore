@@ -1,3 +1,17 @@
 .worktrees/
 .DS_Store
 node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Build and test output
+dist/
+coverage/
+*.log
+
+# Editor state
+.idea/
+.vscode/

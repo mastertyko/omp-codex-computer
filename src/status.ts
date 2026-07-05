@@ -16,6 +16,9 @@ const execFileAsync = promisify(execFile);
 export const DEFAULT_CODEX_APP_PATH = "/Applications/Codex.app";
 export const DEFAULT_PLUGIN_NAME = "computer-use";
 export const DEFAULT_MCP_SERVER_NAME = "computer-use";
+const EXPECTED_MCP_TOOL_NAME_LOOKUP = Object.fromEntries(
+  COMPUTER_USE_MCP_TOOL_NAMES.map((toolName) => [toolName, true] as const),
+) as Record<string, true>;
 
 export type ComputerUseStatusReason =
   | "ready"
@@ -38,6 +41,7 @@ export interface ComputerUseStatus {
   plugin?: PluginSummary;
   mcpServer?: { name: string; toolNames: string[] };
   missingToolNames?: string[];
+  extraToolNames?: string[];
   error?: string;
 }
 
@@ -146,8 +150,9 @@ export function evaluateComputerUseStatus(input: StatusEvaluationInput): Compute
 
   const toolNames = Object.keys(server.tools).sort();
   const missingToolNames = COMPUTER_USE_MCP_TOOL_NAMES.filter((toolName) => !Object.hasOwn(server.tools, toolName));
+  const extraToolNames = toolNames.filter((toolName) => !EXPECTED_MCP_TOOL_NAME_LOOKUP[toolName]);
   if (missingToolNames.length > 0) {
-    return {
+    const status: ComputerUseStatus = {
       reason: "mcp_incomplete",
       message: `${DEFAULT_MCP_SERVER_NAME} MCP server is missing required tools: ${missingToolNames.join(", ")}.`,
       codexVersion,
@@ -158,9 +163,11 @@ export function evaluateComputerUseStatus(input: StatusEvaluationInput): Compute
       mcpServer: { name: server.name, toolNames },
       missingToolNames,
     };
+    if (extraToolNames.length > 0) status.extraToolNames = extraToolNames;
+    return status;
   }
 
-  return {
+  const status: ComputerUseStatus = {
     reason: "ready",
     message: "Codex Computer Use is installed, enabled, and exposing MCP tools.",
     codexVersion,
@@ -170,6 +177,8 @@ export function evaluateComputerUseStatus(input: StatusEvaluationInput): Compute
     plugin: match.plugin,
     mcpServer: { name: server.name, toolNames },
   };
+  if (extraToolNames.length > 0) status.extraToolNames = extraToolNames;
+  return status;
 }
 
 export function formatComputerUseStatus(status: ComputerUseStatus): string {
@@ -195,6 +204,9 @@ export function formatComputerUseStatus(status: ComputerUseStatus): string {
     lines.push(`MCP tools: ${status.mcpServer.toolNames.join(", ")}`);
   }
   if (status.missingToolNames?.length) lines.push(`Missing MCP tools: ${status.missingToolNames.join(", ")}`);
+  if (status.extraToolNames?.length) {
+    lines.push(`Additional upstream MCP tools not exposed by adapter: ${status.extraToolNames.join(", ")}`);
+  }
   if (status.error) lines.push(`Error: ${status.error}`);
 
   return lines.join("\n");

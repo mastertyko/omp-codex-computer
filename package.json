@@ -2,12 +2,21 @@
   "name": "omp-codex-computer",
   "version": "0.1.0",
   "description": "OMP extension for using OpenAI Codex Computer Use through Codex app-server",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/mastertyko/omp-codex-computer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mastertyko/omp-codex-computer/issues"
+  },
+  "homepage": "https://github.com/mastertyko/omp-codex-computer#readme",
   "type": "module",
   "main": "./src/index.ts",
   "files": [
     "src",
     "skills",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "vitest run --passWithNoTests",
