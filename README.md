@@ -38,9 +38,13 @@ For local development, keep `bun run check` green before opening a pull request.
 
 - `/codex-computer status` — checks Codex CLI/app, the bundled `computer-use` plugin, required MCP tools, and reports additional upstream MCP tools not exposed by this adapter.
 - `/codex-computer diagnose` — prints the same detailed readiness/update report.
-- `/codex-computer enable`
-- `/codex-computer disable`
+- `/codex-computer enable` — enables the `computer_use_*` tools.
+- `/codex-computer disable` — disables the `computer_use_*` tools and shuts down the runtime.
 - `/codex-computer restart`
+- `/codex-computer hide-status` — hides the `Codex 💻: …` footer status for the current extension instance.
+- `/codex-computer show-status` — shows the footer status again.
+
+Set `OMP_CODEX_COMPUTER_STATUS=off` before starting OMP to default the footer status to hidden.
 
 ## Safety
 

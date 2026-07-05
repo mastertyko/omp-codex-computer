@@ -13,7 +13,7 @@ class FakeRuntime {
   resetSession = vi.fn();
   shutdown = vi.fn(async () => {});
   callTool = vi.fn();
-
+  setStatusVisible = vi.fn();
   constructor() {
     runtimeInstances.push(this);
   }
@@ -101,6 +101,8 @@ describe("ompCodexComputer", () => {
       { value: "enable ", label: "enable" },
       { value: "disable ", label: "disable" },
       { value: "restart ", label: "restart" },
+      { value: "hide-status ", label: "hide-status" },
+      { value: "show-status ", label: "show-status" },
     ]);
   });
 
@@ -142,6 +144,39 @@ describe("ompCodexComputer", () => {
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
       content: "Codex Computer Use runtime restarted. It will reconnect on the next tool call.",
+      display: true,
+    });
+  });
+
+  it("hides and shows the footer status through the runtime command handlers", async () => {
+    const pi = createFakePi();
+    const ctx = createCommandContext();
+    const { default: ompCodexComputer } = await import("../src/index");
+    ompCodexComputer(pi as never);
+    const command = pi.commands.get("codex-computer");
+    const runtime = runtimeInstances.at(-1);
+
+    await command?.handler("hide-status", ctx);
+
+    expect(runtime?.setStatusVisible).toHaveBeenNthCalledWith(1, false);
+    expect(ctx.ui.notify).toHaveBeenNthCalledWith(
+      1,
+      "Codex Computer Use footer status hidden. Run /codex-computer show-status to show it again.",
+      "info",
+    );
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Codex Computer Use footer status hidden. Run /codex-computer show-status to show it again.",
+      display: true,
+    });
+
+    await command?.handler("show-status", ctx);
+
+    expect(runtime?.setStatusVisible).toHaveBeenNthCalledWith(2, true);
+    expect(ctx.ui.notify).toHaveBeenNthCalledWith(2, "Codex Computer Use footer status shown.", "info");
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Codex Computer Use footer status shown.",
       display: true,
     });
   });

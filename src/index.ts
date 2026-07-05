@@ -6,7 +6,7 @@ import { checkComputerUseStatus, formatComputerUseStatus } from "./status";
 
 const SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url));
 const COMMAND_NAME = "codex-computer";
-const COMMANDS = ["status", "diagnose", "enable", "disable", "restart"] as const;
+const COMMANDS = ["status", "diagnose", "enable", "disable", "restart", "hide-status", "show-status"] as const;
 
 export default function ompCodexComputer(pi: ExtensionAPI): void {
   const runtime = new ComputerUseRuntime();
@@ -71,6 +71,18 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
       if (command === "restart") {
         await runtime.shutdown();
         sendCommandMessage(pi, ctx, "Codex Computer Use runtime restarted. It will reconnect on the next tool call.");
+        return;
+      }
+
+      if (command === "hide-status") {
+        runtime.setStatusVisible(false);
+        sendCommandMessage(pi, ctx, "Codex Computer Use footer status hidden. Run /codex-computer show-status to show it again.");
+        return;
+      }
+
+      if (command === "show-status") {
+        runtime.setStatusVisible(true);
+        sendCommandMessage(pi, ctx, "Codex Computer Use footer status shown.");
         return;
       }
 

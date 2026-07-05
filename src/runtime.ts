@@ -9,6 +9,15 @@ import { CodexThreadManager } from "./thread-manager";
 const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
 const COMPUTER_STATUS_KEY = "codex-computer";
 const COMPUTER_STATUS_LABEL = "Codex 💻";
+const STATUS_DISABLED_VALUES: Record<string, true> = {
+  "0": true,
+  false: true,
+  off: true,
+  no: true,
+  disabled: true,
+  hidden: true,
+  hide: true,
+};
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 const PERMISSION_FALLBACK_MESSAGE = "Codex requests permission to continue.";
 
@@ -23,6 +32,8 @@ export class ComputerUseRuntime {
   private latestContext: ExtensionContext | undefined;
   private initializePromise: Promise<InitializeResponse> | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
+  private statusVisible = getStatusVisibleByDefault();
+  private statusValue = "idle";
 
   constructor() {
     this.client.onServerRequest((request, responder) => this.handleServerRequest(request, responder));
@@ -30,10 +41,16 @@ export class ComputerUseRuntime {
 
   setContext(ctx: ExtensionContext): void {
     this.latestContext = ctx;
+    if (!this.statusVisible) this.renderStatus();
   }
 
   resetSession(): void {
     this.threads.reset();
+  }
+
+  setStatusVisible(visible: boolean): void {
+    this.statusVisible = visible;
+    this.renderStatus();
   }
 
   async shutdown(): Promise<void> {
@@ -42,7 +59,7 @@ export class ComputerUseRuntime {
     this.initializePromise = undefined;
     this.threads.reset();
     await this.client.stop();
-    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "idle");
+    this.setStatus("idle");
   }
 
   async initialize(): Promise<InitializeResponse> {
@@ -79,15 +96,15 @@ export class ComputerUseRuntime {
   ): Promise<ComputerUseToolResult> {
     this.setContext(ctx);
     this.clearIdleTimer();
-    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, typeof args.app === "string" ? `working: ${args.app}` : "working");
+    this.setStatus(typeof args.app === "string" ? `working: ${args.app}` : "working");
 
     try {
       await this.initialize();
       const result = await this.backend.callTool(ctx.cwd, tool, args);
-      this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "ready");
+      this.setStatus("ready");
       return result;
     } catch (error) {
-      this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "error");
+      this.setStatus("error");
       throw error;
     } finally {
       this.scheduleIdleShutdown();
@@ -109,7 +126,7 @@ export class ComputerUseRuntime {
 
     const params = getElicitationParams(request.params);
     const message = params.message ?? PERMISSION_FALLBACK_MESSAGE;
-    this.setStatus(COMPUTER_STATUS_KEY, COMPUTER_STATUS_LABEL, "permission");
+    this.setStatus("permission");
     logDebug("elicitation.request", {
       method: request.method,
       serverName: params.serverName,
@@ -147,10 +164,15 @@ export class ComputerUseRuntime {
     responder.accept({ action: approved ? "accept" : "decline", content: approved ? {} : null });
   }
 
-  private setStatus(key: string, label: string, value: string): void {
+  private setStatus(value: string): void {
+    this.statusValue = value;
+    this.renderStatus();
+  }
+
+  private renderStatus(): void {
     const ctx = this.latestContext;
     if (!ctx?.hasUI) return;
-    ctx.ui.setStatus(key, `${label}: ${value}`);
+    ctx.ui.setStatus(COMPUTER_STATUS_KEY, this.statusVisible ? `${COMPUTER_STATUS_LABEL}: ${this.statusValue}` : undefined);
   }
 
   private clearIdleTimer(): void {
@@ -193,6 +215,11 @@ function getElicitationParams(params: unknown): { message?: string; serverName?:
     message: typeof record.message === "string" ? record.message : undefined,
     serverName: typeof record.serverName === "string" ? record.serverName : undefined,
   };
+}
+
+function getStatusVisibleByDefault(): boolean {
+  const value = process.env.OMP_CODEX_COMPUTER_STATUS?.trim().toLowerCase();
+  return value === undefined || STATUS_DISABLED_VALUES[value] !== true;
 }
 
 function getIdleTimeoutMs(): number | undefined {

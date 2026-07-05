@@ -5,7 +5,7 @@ import type { AppServerRequest } from "../src/protocol";
 import { ComputerUseRuntime, shouldDevAutoAccept } from "../src/runtime";
 
 const originalDevAutoAcceptApps = process.env.OMP_CODEX_COMPUTER_DEV_AUTO_ACCEPT_APPS;
-
+const originalStatusVisibility = process.env.OMP_CODEX_COMPUTER_STATUS;
 class FakeResponder implements ServerRequestResponder {
   accepted: unknown[] = [];
   rejected: Array<{ code: number; message: string; data?: unknown }> = [];
@@ -37,13 +37,17 @@ function permissionRequest(message: string): AppServerRequest {
   };
 }
 
-function createContext(cwd: string, confirm: () => Promise<boolean>): ExtensionContext {
+function createContext(
+  cwd: string,
+  confirm: () => Promise<boolean>,
+  setStatus: (key: string, value: string | undefined) => void = () => undefined,
+): ExtensionContext {
   return {
     cwd,
     hasUI: true,
     ui: {
       confirm,
-      setStatus: () => undefined,
+      setStatus,
     },
   } as never as ExtensionContext;
 }
@@ -156,6 +160,12 @@ describe("ComputerUseRuntime lifecycle", () => {
     } else {
       process.env.OMP_CODEX_COMPUTER_DEV_AUTO_ACCEPT_APPS = originalDevAutoAcceptApps;
     }
+
+    if (originalStatusVisibility === undefined) {
+      delete process.env.OMP_CODEX_COMPUTER_STATUS;
+    } else {
+      process.env.OMP_CODEX_COMPUTER_STATUS = originalStatusVisibility;
+    }
   });
 
   it("retries initialize after a rejected request while the client is still running", async () => {
@@ -224,5 +234,58 @@ describe("ComputerUseRuntime lifecycle", () => {
     await flushPromises();
     secondResult.resolve({ content: [] });
     await expect(second).resolves.toEqual({ content: [] });
+  });
+  it("clears the footer when hidden, suppresses hidden updates, and restores the latest status when shown", async () => {
+    const setStatus = vi.fn();
+    const runtime = new ComputerUseRuntime();
+    const backend = {
+      callTool: vi.fn(async () => ({ content: [] })),
+    };
+    const client = {
+      isRunning: () => true,
+      request: vi.fn(async () => ({
+        userAgent: "test",
+        codexHome: "/tmp/codex",
+        platformFamily: "test",
+        platformOs: "test",
+      })),
+      stop: async () => undefined,
+      onServerRequest: () => undefined,
+    };
+    const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+    runtimeInternals.client = client;
+    runtimeInternals.backend = backend;
+
+    runtime.setContext(createContext("/tmp/project", async () => true, setStatus));
+    await runtime.callTool(createContext("/tmp/project", async () => true, setStatus), "inspect", { app: "Safari" });
+
+    expect(setStatus).toHaveBeenNthCalledWith(1, "codex-computer", "Codex 💻: working: Safari");
+    expect(setStatus).toHaveBeenNthCalledWith(2, "codex-computer", "Codex 💻: ready");
+
+    runtime.setStatusVisible(false);
+
+    expect(setStatus).toHaveBeenNthCalledWith(3, "codex-computer", undefined);
+
+    const responder = new FakeResponder();
+    await runtime.handleServerRequestForTest(permissionRequest("Allow Codex to use TextEdit?"), responder);
+
+    expect(setStatus).toHaveBeenNthCalledWith(4, "codex-computer", undefined);
+    expect(responder.accepted).toEqual([{ action: "accept", content: {} }]);
+
+    runtime.setStatusVisible(true);
+
+    expect(setStatus).toHaveBeenNthCalledWith(5, "codex-computer", "Codex 💻: permission");
+  });
+
+  it("defaults the footer to hidden when OMP_CODEX_COMPUTER_STATUS=off and clears the status key on context set", () => {
+    process.env.OMP_CODEX_COMPUTER_STATUS = "off";
+
+    const setStatus = vi.fn();
+    const runtime = new ComputerUseRuntime();
+
+    runtime.setContext(createContext("/tmp/project", async () => true, setStatus));
+
+    expect(setStatus).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenCalledWith("codex-computer", undefined);
   });
 });
