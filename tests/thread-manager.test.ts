@@ -45,6 +45,20 @@ describe("CodexThreadManager", () => {
     expect(client.calls[0]).toEqual({ method: "thread/start", params: { cwd: "/tmp/project", ephemeral: true } });
   });
 
+  it("reuses the cached thread only for the same cwd", async () => {
+    const client = new FakeClient();
+    const manager = new CodexThreadManager(client as never);
+
+    await expect(manager.getThreadId("/tmp/project-a")).resolves.toBe("thread-1");
+    await expect(manager.getThreadId("/tmp/project-a")).resolves.toBe("thread-1");
+    await expect(manager.getThreadId("/tmp/project-b")).resolves.toBe("thread-2");
+
+    expect(client.calls).toEqual([
+      { method: "thread/start", params: { cwd: "/tmp/project-a", ephemeral: true } },
+      { method: "thread/start", params: { cwd: "/tmp/project-b", ephemeral: true } },
+    ]);
+  });
+
   it("shares one in-flight start request during concurrent cold start", async () => {
     const start = deferred<{
       thread: { id: string; sessionId: string; status: Record<string, never>; cwd: string; ephemeral: boolean };
