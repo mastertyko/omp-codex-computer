@@ -103,7 +103,7 @@ describe("ComputerUseRuntime server requests", () => {
     await runtime.handleServerRequestForTest(permissionRequest("Allow Codex to use TextEdit?"), responder);
 
     expect(confirm).toHaveBeenCalledWith(
-      "Codex Computer Use permission",
+      "Codex permission",
       "Allow Codex to use TextEdit?",
       undefined,
     );

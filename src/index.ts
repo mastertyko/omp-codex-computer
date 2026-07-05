@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { inspectChromeBridgeStatus, type ChromeBridgeStatus } from "./chrome-status";
+import { CHROME_TOOL_NAMES, registerChromeTools } from "./chrome-tools";
 import { COMPUTER_USE_TOOL_NAMES, registerComputerUseTools } from "./computer-use-tools";
 import { ComputerUseRuntime } from "./runtime";
 import { checkComputerUseStatus, formatComputerUseStatus } from "./status";
@@ -14,6 +15,7 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
   let toolsEnabled = true;
 
   registerComputerUseTools(pi, runtime);
+  registerChromeTools(pi, runtime);
 
   pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIR] }));
 
@@ -32,7 +34,7 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: "Manage Codex Computer Use tools.",
+    description: "Manage Codex Computer Use and Chrome tools.",
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart();
       return COMMANDS
@@ -58,7 +60,7 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
       if (command === "enable") {
         toolsEnabled = true;
         await setComputerUseToolsEnabled(pi, true);
-        sendCommandMessage(pi, ctx, "Codex Computer Use tools enabled.");
+        sendCommandMessage(pi, ctx, "Codex Computer Use and Chrome tools enabled.");
         return;
       }
 
@@ -66,13 +68,13 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
         toolsEnabled = false;
         await setComputerUseToolsEnabled(pi, false);
         await runtime.shutdown();
-        sendCommandMessage(pi, ctx, "Codex Computer Use tools disabled.");
+        sendCommandMessage(pi, ctx, "Codex Computer Use and Chrome tools disabled.");
         return;
       }
 
       if (command === "restart") {
         await runtime.shutdown();
-        sendCommandMessage(pi, ctx, "Codex Computer Use runtime restarted. It will reconnect on the next tool call.");
+        sendCommandMessage(pi, ctx, "Codex Computer Use and Chrome runtime restarted. It will reconnect on the next tool call.");
         return;
       }
 
@@ -84,11 +86,12 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
 export async function setComputerUseToolsEnabled(pi: ExtensionAPI, enabled: boolean): Promise<void> {
   const active = new Set(pi.getActiveTools());
   const before = [...active];
+  const managedToolNames = [...COMPUTER_USE_TOOL_NAMES, ...CHROME_TOOL_NAMES];
 
   if (enabled) {
-    for (const toolName of COMPUTER_USE_TOOL_NAMES) active.add(toolName);
+    for (const toolName of managedToolNames) active.add(toolName);
   } else {
-    for (const toolName of COMPUTER_USE_TOOL_NAMES) active.delete(toolName);
+    for (const toolName of managedToolNames) active.delete(toolName);
   }
 
   const after = [...active];

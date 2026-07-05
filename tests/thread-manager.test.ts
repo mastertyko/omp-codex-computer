@@ -45,6 +45,19 @@ describe("CodexThreadManager", () => {
     expect(client.calls[0]).toEqual({ method: "thread/start", params: { cwd: "/tmp/project", ephemeral: true } });
   });
 
+  it("returns cached thread metadata for callers that need session context", async () => {
+    const client = new FakeClient();
+    const manager = new CodexThreadManager(client as never);
+
+    await expect(manager.getThread("/tmp/project")).resolves.toMatchObject({
+      id: "thread-1",
+      sessionId: "session",
+    });
+    await expect(manager.getThreadId("/tmp/project")).resolves.toBe("thread-1");
+
+    expect(client.calls).toHaveLength(1);
+  });
+
   it("caches thread ids per cwd and reuses them when switching back", async () => {
     const client = new FakeClient();
     const manager = new CodexThreadManager(client as never);

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod/v4";
+import { CHROME_TOOL_NAMES } from "../src/chrome-tools";
+import { COMPUTER_USE_TOOL_NAMES } from "../src/computer-use-tools";
 
 const runtimeInstances: FakeRuntime[] = [];
 const statusMock = vi.hoisted(() => ({
@@ -25,6 +27,7 @@ class FakeRuntime {
   resetSession = vi.fn();
   shutdown = vi.fn(async () => {});
   callTool = vi.fn();
+  callChromeTool = vi.fn();
 
   constructor() {
     runtimeInstances.push(this);
@@ -40,7 +43,7 @@ vi.mock("../src/chrome-status", () => chromeMock);
 
 function createFakePi(activeTools = ["read", "computer_use_click"]) {
   const tools: unknown[] = [];
-  const commands = new Map<string, { getArgumentCompletions?: (args: string) => unknown[] | Promise<unknown[]>; handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const commands = new Map<string, { description?: string; getArgumentCompletions?: (args: string) => unknown[] | Promise<unknown[]>; handler: (args: string, ctx: unknown) => Promise<void> }>();
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   let active = [...activeTools];
   const setActiveToolsCalls: string[][] = [];
@@ -56,7 +59,7 @@ function createFakePi(activeTools = ["read", "computer_use_click"]) {
     registerTool(tool: unknown): void {
       tools.push(tool);
     },
-    registerCommand(name: string, options: { getArgumentCompletions?: (args: string) => unknown[] | Promise<unknown[]>; handler: (args: string, ctx: unknown) => Promise<void> }): void {
+    registerCommand(name: string, options: { description?: string; getArgumentCompletions?: (args: string) => unknown[] | Promise<unknown[]>; handler: (args: string, ctx: unknown) => Promise<void> }): void {
       commands.set(name, options);
     },
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void {
@@ -93,25 +96,18 @@ beforeEach(() => {
 });
 
 describe("ompCodexComputer", () => {
-  it("registers Computer Use tools, resources, lifecycle hooks, and the codex-computer command", async () => {
+  it("registers Computer Use and Chrome tools, resources, lifecycle hooks, and the codex-computer command", async () => {
     const pi = createFakePi();
     const { default: ompCodexComputer } = await import("../src/index");
 
     ompCodexComputer(pi as never);
 
     expect(pi.tools.map((tool) => (tool as { name: string }).name)).toEqual([
-      "computer_use_list_apps",
-      "computer_use_get_app_state",
-      "computer_use_click",
-      "computer_use_type_text",
-      "computer_use_press_key",
-      "computer_use_scroll",
-      "computer_use_drag",
-      "computer_use_set_value",
-      "computer_use_select_text",
-      "computer_use_perform_secondary_action",
+      ...COMPUTER_USE_TOOL_NAMES,
+      ...CHROME_TOOL_NAMES,
     ]);
     expect(pi.commands.has("codex-computer")).toBe(true);
+    expect(pi.commands.get("codex-computer")?.description).toBe("Manage Codex Computer Use and Chrome tools.");
     expect([...pi.handlers.keys()].sort()).toEqual(["agent_end", "resources_discover", "session_shutdown", "session_start"]);
 
     const resources = await pi.handlers.get("resources_discover")?.[0]({ type: "resources_discover" }, createCommandContext());
@@ -127,7 +123,7 @@ describe("ompCodexComputer", () => {
     ]);
   });
 
-  it("enables and disables only the Computer Use tools while preserving other active tools", async () => {
+  it("enables and disables the managed Computer Use and Chrome tools while preserving other active tools", async () => {
     const pi = createFakePi(["read", "computer_use_click"]);
     const ctx = createCommandContext();
     const { default: ompCodexComputer } = await import("../src/index");
@@ -138,15 +134,8 @@ describe("ompCodexComputer", () => {
     expect(pi.setActiveToolsCalls[0]).toEqual([
       "read",
       "computer_use_click",
-      "computer_use_list_apps",
-      "computer_use_get_app_state",
-      "computer_use_type_text",
-      "computer_use_press_key",
-      "computer_use_scroll",
-      "computer_use_drag",
-      "computer_use_set_value",
-      "computer_use_select_text",
-      "computer_use_perform_secondary_action",
+      ...COMPUTER_USE_TOOL_NAMES.filter((name) => name !== "computer_use_click"),
+      ...CHROME_TOOL_NAMES,
     ]);
 
     await command?.handler("disable", ctx);
@@ -156,6 +145,23 @@ describe("ompCodexComputer", () => {
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
       content: expect.stringContaining("disabled"),
+      display: true,
+    });
+  });
+
+  it("restarts the shared Computer Use and Chrome runtime", async () => {
+    const pi = createFakePi();
+    const ctx = createCommandContext();
+    const { default: ompCodexComputer } = await import("../src/index");
+    ompCodexComputer(pi as never);
+    const command = pi.commands.get("codex-computer");
+
+    await command?.handler("restart", ctx);
+
+    expect(runtimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Codex Computer Use and Chrome runtime restarted. It will reconnect on the next tool call.",
       display: true,
     });
   });
