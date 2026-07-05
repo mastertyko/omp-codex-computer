@@ -40,7 +40,7 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
         .map((command) => ({ value: `${command} `, label: command }));
     },
     async handler(args, ctx) {
-      const command = args.trim().split(/\s+/, 1)[0] ?? "";
+      const command = args.trim().split(/\s+/, 1)[0] || "status";
 
       if (command === "status") {
         const status = await checkComputerUseStatus(ctx.cwd);

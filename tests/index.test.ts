@@ -183,4 +183,22 @@ describe("ompCodexComputer", () => {
       display: true,
     });
   });
+
+  it("defaults an empty command to status", async () => {
+    const pi = createFakePi();
+    const ctx = createCommandContext();
+    const { default: ompCodexComputer } = await import("../src/index");
+    ompCodexComputer(pi as never);
+    const command = pi.commands.get("codex-computer");
+
+    await command?.handler("   ", ctx);
+
+    expect(statusMock.checkComputerUseStatus).toHaveBeenCalledWith("/tmp/project");
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Computer Use status: ready",
+      display: true,
+    });
+    expect(JSON.stringify(pi.messages.at(-1))).not.toContain("Usage:");
+  });
 });
