@@ -11,16 +11,26 @@ Local OMP extension that exposes OpenAI Codex Computer Use through `codex app-se
 - Accessibility and Screen Recording permissions granted when Codex Computer Use asks
 - Bundled `computer-use` Codex plugin available in Codex.app; this extension cannot operate without it
 
-## Use from source
+## Installation
 
-Until a packaged release exists, use the extension from this repository:
+Install the npm package through OMP:
 
 ```bash
-git clone git@github.com:mastertyko/omp-codex-computer.git
-cd omp-codex-computer
+omp install omp-codex-computer
+```
+
+For private pre-release testing from GitHub over SSH:
+
+```bash
+omp install git@github.com:mastertyko/omp-codex-computer.git
+```
+
+For local development, link the working tree into OMP and keep checks green:
+
+```bash
+omp install .
 bun install
 bun run check
-omp-dev -e .
 ```
 
 Inside OMP:
@@ -32,7 +42,7 @@ Inside OMP:
 
 The extension registers `computer_use_*` tools for native macOS app inspection and interaction through Codex Computer Use.
 
-For local development, keep `bun run check` green before opening a pull request. Use `bun run test:watch` while iterating.
+Use `omp-dev -e .` for a local smoke test without installing the package.
 
 ## Commands
 
@@ -74,6 +84,6 @@ omp-dev -e .
 
 Verified on 2026-07-05 with OMP v16.3.6 and Codex CLI 0.142.5:
 
-- `bun run check` passed with 80 tests.
+- `bun run check` passed with 83 tests.
 - `/codex-computer diagnose` reported Codex Computer Use ready.
 - A safe `computer_use_list_apps` model path listed available apps.

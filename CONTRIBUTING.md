@@ -47,6 +47,17 @@ Before opening a pull request:
 4. Avoid logging raw app content, screenshots, credentials, headers, tokens, cookies, or API keys.
 5. Update README or skill guidance when user-facing commands, safety behavior, or requirements change.
 
+## Releases
+
+NPM releases are published by the `Publish npm package` GitHub Actions workflow.
+
+Before publishing:
+
+1. Update `package.json` version.
+2. Keep `bun run check` green.
+3. Verify package contents with `npm pack --dry-run`.
+4. Publish from a GitHub release or manual workflow dispatch with `NPM_TOKEN` configured.
+
 ## Desktop automation safety
 
 This extension exposes native macOS app inspection and interaction through Codex Computer Use. Changes that add or alter mutating tools must preserve these expectations:
