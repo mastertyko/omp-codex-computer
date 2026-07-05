@@ -3,21 +3,42 @@ import type { ThreadStartResponse } from "./protocol";
 
 export class CodexThreadManager {
   private threadId: string | undefined;
+  private startPromise: Promise<string> | undefined;
+  private generation = 0;
 
   constructor(private readonly client: Pick<AppServerClient, "request">) {}
 
   reset(): void {
     this.threadId = undefined;
+    this.startPromise = undefined;
+    this.generation++;
   }
 
   async getThreadId(cwd: string): Promise<string> {
     if (this.threadId) return this.threadId;
+    if (this.startPromise) return this.startPromise;
 
-    const response = await this.client.request<ThreadStartResponse>("thread/start", {
-      cwd,
-      ephemeral: true,
-    });
-    this.threadId = response.thread.id;
-    return this.threadId;
+    const generation = this.generation;
+    const startPromise = this.client
+      .request<ThreadStartResponse>("thread/start", {
+        cwd,
+        ephemeral: true,
+      })
+      .then((response) => {
+        if (this.generation === generation && this.startPromise === startPromise) {
+          this.threadId = response.thread.id;
+          this.startPromise = undefined;
+        }
+        return response.thread.id;
+      })
+      .catch((error: unknown) => {
+        if (this.generation === generation && this.startPromise === startPromise) {
+          this.startPromise = undefined;
+        }
+        throw error;
+      });
+
+    this.startPromise = startPromise;
+    return this.startPromise;
   }
 }

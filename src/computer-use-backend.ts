@@ -21,6 +21,13 @@ interface RawMcpToolCallResponse {
   isError?: boolean | null;
 }
 
+class McpToolCallError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpToolCallError";
+  }
+}
+
 export class ComputerUseBackend {
   private readonly queue = new SerialQueue();
   private readonly mcpServerName: string;
@@ -39,6 +46,8 @@ export class ComputerUseBackend {
       try {
         return await this.callToolOnce(cwd, tool, args);
       } catch (error) {
+        if (error instanceof McpToolCallError) throw error;
+
         const message = error instanceof Error ? error.message : String(error);
         if (!/thread not found|invalid thread id/i.test(message)) throw error;
 
@@ -64,7 +73,7 @@ export class ComputerUseBackend {
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("\n");
-      throw new Error(text || `${this.mcpServerName}.${tool} failed`);
+      throw new McpToolCallError(text || `${this.mcpServerName}.${tool} failed`);
     }
 
     const content = convertCodexContentToOmpContent(response.content);
