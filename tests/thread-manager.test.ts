@@ -45,13 +45,13 @@ describe("CodexThreadManager", () => {
     expect(client.calls[0]).toEqual({ method: "thread/start", params: { cwd: "/tmp/project", ephemeral: true } });
   });
 
-  it("reuses the cached thread only for the same cwd", async () => {
+  it("caches thread ids per cwd and reuses them when switching back", async () => {
     const client = new FakeClient();
     const manager = new CodexThreadManager(client as never);
 
     await expect(manager.getThreadId("/tmp/project-a")).resolves.toBe("thread-1");
-    await expect(manager.getThreadId("/tmp/project-a")).resolves.toBe("thread-1");
     await expect(manager.getThreadId("/tmp/project-b")).resolves.toBe("thread-2");
+    await expect(manager.getThreadId("/tmp/project-a")).resolves.toBe("thread-1");
 
     expect(client.calls).toEqual([
       { method: "thread/start", params: { cwd: "/tmp/project-a", ephemeral: true } },
