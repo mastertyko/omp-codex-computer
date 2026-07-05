@@ -1,5 +1,71 @@
-import { describe, expect, it } from "vitest";
-import { redactForLog } from "../src/log";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logDebug, redactForLog } from "../src/log";
+
+const LOG_PREFIX = "[omp-codex-computer] ";
+
+let originalDebug: string | undefined;
+let originalLog: string | undefined;
+
+beforeEach(() => {
+  originalDebug = process.env.OMP_CODEX_COMPUTER_DEBUG;
+  originalLog = process.env.OMP_CODEX_COMPUTER_LOG;
+  delete process.env.OMP_CODEX_COMPUTER_DEBUG;
+  delete process.env.OMP_CODEX_COMPUTER_LOG;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+
+  if (originalDebug === undefined) {
+    delete process.env.OMP_CODEX_COMPUTER_DEBUG;
+  } else {
+    process.env.OMP_CODEX_COMPUTER_DEBUG = originalDebug;
+  }
+
+  if (originalLog === undefined) {
+    delete process.env.OMP_CODEX_COMPUTER_LOG;
+  } else {
+    process.env.OMP_CODEX_COMPUTER_LOG = originalLog;
+  }
+});
+
+function spyOnStderr(): string[] {
+  const writes: string[] = [];
+  vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write);
+  return writes;
+}
+
+async function readLogLine(path: string): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const text = await readFile(path, "utf8");
+      const line = text.trim();
+      if (line) return line;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw lastError ?? new Error("Log file was not written");
+}
+
+function expectRedactedLogEntry(entry: Record<string, unknown>): void {
+  expect(entry.event).toBe("debug-event");
+  expect(entry.timestamp).toEqual(expect.any(String));
+  expect(entry.app).toBe("TextEdit");
+  expect(entry.token).toBe("[redacted]");
+  expect(entry.nested).toEqual({
+    message: "visible",
+    screenshot: "[redacted]",
+  });
+}
 
 describe("redactForLog", () => {
   it("redacts sensitive keys recursively", () => {
@@ -22,5 +88,57 @@ describe("redactForLog", () => {
       },
       content: "[redacted]",
     });
+  });
+});
+
+describe("logDebug", () => {
+  it("does not write to stderr when debug and log env vars are unset", () => {
+    const writes = spyOnStderr();
+
+    logDebug("debug-event", { app: "TextEdit" });
+
+    expect(writes).toEqual([]);
+  });
+
+  it("writes one prefixed JSON log line to stderr when debug is enabled", () => {
+    process.env.OMP_CODEX_COMPUTER_DEBUG = "1";
+    const writes = spyOnStderr();
+
+    logDebug("debug-event", {
+      app: "TextEdit",
+      token: "secret",
+      nested: {
+        message: "visible",
+        screenshot: "base64",
+      },
+    });
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.startsWith(LOG_PREFIX)).toBe(true);
+    const entry = JSON.parse(writes[0]!.slice(LOG_PREFIX.length).trim()) as Record<string, unknown>;
+    expectRedactedLogEntry(entry);
+  });
+
+  it("appends one redacted JSON log line to the configured log file", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "omp-codex-computer-log-"));
+    const logPath = join(tempDir, "debug.log");
+    process.env.OMP_CODEX_COMPUTER_LOG = logPath;
+
+    try {
+      logDebug("debug-event", {
+        app: "TextEdit",
+        token: "secret",
+        nested: {
+          message: "visible",
+          screenshot: "base64",
+        },
+      });
+
+      const line = await readLogLine(logPath);
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      expectRedactedLogEntry(entry);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
