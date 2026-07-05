@@ -59,12 +59,24 @@ async function readLogLine(path: string): Promise<string> {
 function expectRedactedLogEntry(entry: Record<string, unknown>): void {
   expect(entry.event).toBe("debug-event");
   expect(entry.timestamp).toEqual(expect.any(String));
-  expect(entry.app).toBe("TextEdit");
-  expect(entry.token).toBe("[redacted]");
-  expect(entry.nested).toEqual({
-    message: "visible",
-    screenshot: "[redacted]",
+  expect(entry.data).toEqual({
+    app: "TextEdit",
+    token: "[redacted]",
+    nested: {
+      message: "visible",
+      screenshot: "[redacted]",
+    },
   });
+}
+
+function expectObject(value: unknown): Record<string, unknown> {
+  expect(value).toEqual(expect.any(Object));
+  return value as Record<string, unknown>;
+}
+
+function expectIsoTimestamp(value: unknown): void {
+  expect(value).toEqual(expect.any(String));
+  expect(Number.isNaN(Date.parse(value as string))).toBe(false);
 }
 
 describe("redactForLog", () => {
@@ -87,6 +99,47 @@ describe("redactForLog", () => {
         message: "visible",
       },
       content: "[redacted]",
+    });
+  });
+
+  it("redacts common credential and auth fields", () => {
+    const result = redactForLog({
+      apiKey: "sk-secret",
+      sessionId: "session-secret",
+      credential: "credential-secret",
+      authHeader: "Bearer auth-secret",
+      authorization: "Bearer authorization-secret",
+      headers: {
+        cookie: "sid=cookie-secret",
+        accept: "application/json",
+      },
+    });
+
+    expect(result).toEqual({
+      apiKey: "[redacted]",
+      sessionId: "[redacted]",
+      credential: "[redacted]",
+      authHeader: "[redacted]",
+      authorization: "[redacted]",
+      headers: "[redacted]",
+    });
+  });
+
+  it("redacts broad user data container fields", () => {
+    const result = redactForLog({
+      payload: { userText: "private" },
+      params: { query: "private" },
+      arguments: { prompt: "private" },
+      body: { message: "private" },
+      metadata: "visible",
+    });
+
+    expect(result).toEqual({
+      payload: "[redacted]",
+      params: "[redacted]",
+      arguments: "[redacted]",
+      body: "[redacted]",
+      metadata: "visible",
     });
   });
 });
@@ -117,6 +170,20 @@ describe("logDebug", () => {
     expect(writes[0]?.startsWith(LOG_PREFIX)).toBe(true);
     const entry = JSON.parse(writes[0]!.slice(LOG_PREFIX.length).trim()) as Record<string, unknown>;
     expectRedactedLogEntry(entry);
+  });
+
+  it("keeps log metadata separate from user data", () => {
+    process.env.OMP_CODEX_COMPUTER_DEBUG = "1";
+    const writes = spyOnStderr();
+
+    logDebug("real-event", { event: "fake", timestamp: "fake" });
+
+    expect(writes).toHaveLength(1);
+    const entry = JSON.parse(writes[0]!.slice(LOG_PREFIX.length).trim()) as Record<string, unknown>;
+    expect(entry.event).toBe("real-event");
+    expectIsoTimestamp(entry.timestamp);
+    expect(expectObject(entry.data).event).toBe("fake");
+    expect(expectObject(entry.data).timestamp).toBe("fake");
   });
 
   it("appends one redacted JSON log line to the configured log file", async () => {

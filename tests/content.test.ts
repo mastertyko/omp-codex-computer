@@ -51,6 +51,32 @@ describe("convertCodexContentToOmpContent", () => {
     }
   });
 
+  it("keeps truncated output within the configured byte budget", () => {
+    const maxBytes = 32;
+    const result = convertCodexContentToOmpContent([{ type: "text", text: "a".repeat(200) }], {
+      maxBytes,
+    });
+
+    expect(result[0]).toMatchObject({ type: "text" });
+    if (result[0]?.type === "text") {
+      expect(Buffer.byteLength(result[0].text, "utf8")).toBeLessThanOrEqual(maxBytes);
+      expect(result[0].text).toContain("truncated");
+    }
+  });
+
+  it("trims multibyte unicode without exceeding the byte budget", () => {
+    const maxBytes = 36;
+    const result = convertCodexContentToOmpContent([{ type: "text", text: "å🙂".repeat(100) }], {
+      maxBytes,
+    });
+
+    expect(result[0]).toMatchObject({ type: "text" });
+    if (result[0]?.type === "text") {
+      expect(Buffer.byteLength(result[0].text, "utf8")).toBeLessThanOrEqual(maxBytes);
+      expect(result[0].text).toContain("truncated");
+    }
+  });
+
   it("stringifies unknown content", () => {
     const result = convertCodexContentToOmpContent({ ok: true });
     expect(result).toHaveLength(1);

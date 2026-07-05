@@ -18,6 +18,7 @@ export interface ContentConversionOptions {
 
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 3000;
+const TRUNCATION_MARKER = "[Output truncated]";
 
 export function convertCodexContentToOmpContent(
   content: unknown,
@@ -68,7 +69,34 @@ function truncateText(text: string, options: ContentConversionOptions): string {
   const truncated = lines.length > maxLines || Buffer.byteLength(text, "utf8") > maxBytes;
   if (!truncated) return text;
 
-  return `${output}\n\n[Output truncated: showing ${Math.min(lines.length, maxLines)} of ${lines.length} lines.]`;
+  return appendTruncationMarker(output, maxBytes);
+}
+
+function appendTruncationMarker(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+  if (markerBytes >= maxBytes) return trimToByteLength(TRUNCATION_MARKER, maxBytes);
+
+  const separator = text ? "\n" : "";
+  const separatorBytes = Buffer.byteLength(separator, "utf8");
+  const textBudget = Math.max(0, maxBytes - markerBytes - separatorBytes);
+  const trimmedText = trimToByteLength(text, textBudget);
+  return trimmedText ? `${trimmedText}${separator}${TRUNCATION_MARKER}` : TRUNCATION_MARKER;
+}
+
+function trimToByteLength(text: string, maxBytes: number): string {
+  let bytes = 0;
+  let output = "";
+
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char, "utf8");
+    if (bytes + charBytes > maxBytes) break;
+    output += char;
+    bytes += charBytes;
+  }
+
+  return output;
 }
 
 function stringifyUnknownContent(content: unknown, options: ContentConversionOptions): string {

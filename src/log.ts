@@ -1,6 +1,8 @@
 import { appendFile } from "node:fs/promises";
 
-const SENSITIVE_KEY_PATTERN = /screenshot|image|base64|token|secret|password|authorization|content|text/i;
+const SENSITIVE_KEY_PATTERN =
+  /screenshot|image|base64|token|secret|password|auth|authorization|cookie|api[-_]?key|session[-_]?id|credential|content|text/i;
+const SENSITIVE_CONTAINER_KEY_PATTERN = /^(headers|payload|params|arguments|body)$/i;
 
 export function logDebug(event: string, data: Record<string, unknown> = {}): void {
   if (process.env.OMP_CODEX_COMPUTER_DEBUG !== "1" && !process.env.OMP_CODEX_COMPUTER_LOG) return;
@@ -8,7 +10,7 @@ export function logDebug(event: string, data: Record<string, unknown> = {}): voi
   const entry = JSON.stringify({
     timestamp: new Date().toISOString(),
     event,
-    ...(redactForLog(data) as Record<string, unknown>),
+    data: redactForLog(data),
   });
 
   if (process.env.OMP_CODEX_COMPUTER_DEBUG === "1") {
@@ -25,7 +27,10 @@ export function redactForLog(value: unknown): unknown {
 
   const redacted: Record<string, unknown> = {};
   for (const [key, nestedValue] of Object.entries(value)) {
-    redacted[key] = SENSITIVE_KEY_PATTERN.test(key) ? "[redacted]" : redactForLog(nestedValue);
+    redacted[key] =
+      SENSITIVE_KEY_PATTERN.test(key) || SENSITIVE_CONTAINER_KEY_PATTERN.test(key)
+        ? "[redacted]"
+        : redactForLog(nestedValue);
   }
   return redacted;
 }
