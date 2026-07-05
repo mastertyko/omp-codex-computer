@@ -62,8 +62,8 @@ function truncateText(text: string, options: ContentConversionOptions): string {
   const lines = text.split("\n");
   let output = lines.slice(0, maxLines).join("\n");
 
-  while (Buffer.byteLength(output, "utf8") > maxBytes && output.length > 0) {
-    output = output.slice(0, Math.max(0, output.length - 256));
+  if (Buffer.byteLength(output, "utf8") > maxBytes) {
+    output = trimToByteLength(output, maxBytes);
   }
 
   const truncated = lines.length > maxLines || Buffer.byteLength(text, "utf8") > maxBytes;

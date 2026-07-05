@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { convertCodexContentToOmpContent } from "../src/content";
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("convertCodexContentToOmpContent", () => {
   it("returns an explicit no-content text block for empty arrays", () => {
     expect(convertCodexContentToOmpContent([])).toEqual([{ type: "text", text: "(no content)" }]);
@@ -88,6 +102,19 @@ describe("convertCodexContentToOmpContent", () => {
     if (result[0]?.type === "text") {
       expect(Buffer.byteLength(result[0].text, "utf8")).toBeLessThanOrEqual(maxBytes);
       expect(result[0].text).toContain("truncated");
+    }
+  });
+
+  it("truncates unicode without leaving unpaired surrogates", () => {
+    const result = convertCodexContentToOmpContent([{ type: "text", text: "å🙂".repeat(100) }], {
+      maxBytes: 500,
+      maxLines: 1000,
+    });
+
+    expect(result[0]).toMatchObject({ type: "text" });
+    if (result[0]?.type === "text") {
+      expect(Buffer.byteLength(result[0].text, "utf8")).toBeLessThanOrEqual(500);
+      expect(hasUnpairedSurrogate(result[0].text)).toBe(false);
     }
   });
 
