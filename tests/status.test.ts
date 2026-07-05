@@ -1,6 +1,43 @@
-import { describe, expect, it } from "vitest";
-import { evaluateComputerUseStatus, findPlugin, formatComputerUseStatus } from "../src/status";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { checkComputerUseStatus, evaluateComputerUseStatus, findPlugin, formatComputerUseStatus } from "../src/status";
 import type { InitializeResponse, McpServerStatusListResponse, PluginListResponse, PluginSummary } from "../src/protocol";
+
+const mockState = vi.hoisted(() => ({
+  execFileError: undefined as Error | undefined,
+  execFileStdout: "codex 1.2.3\n",
+  accessError: undefined as Error | undefined,
+  clientRequests: [] as string[],
+  clientStop: vi.fn(async () => {}),
+  clientRequest: undefined as ((method: string) => Promise<unknown>) | undefined,
+}));
+
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_command: string, _args: string[], _options: unknown, callback: (error: Error | null, result: { stdout: string; stderr: string }) => void) => {
+    callback(mockState.execFileError ?? null, { stdout: mockState.execFileStdout, stderr: "" });
+  }),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  access: vi.fn(async () => {
+    if (mockState.accessError) throw mockState.accessError;
+  }),
+}));
+
+vi.mock("../src/app-server-client", () => ({
+  AppServerClient: vi.fn().mockImplementation(function () {
+    return {
+      request: vi.fn(async (method: string) => {
+        mockState.clientRequests.push(method);
+        if (mockState.clientRequest) return mockState.clientRequest(method);
+        if (method === "initialize") return appServer;
+        if (method === "plugin/list") return plugins([{ name: "openai-bundled", plugin: plugin() }]);
+        if (method === "mcpServerStatus/list") return mcp(["list_apps"]);
+        throw new Error(`unexpected method ${method}`);
+      }),
+      stop: mockState.clientStop,
+    };
+  }),
+}));
 
 const appServer: InitializeResponse = {
   userAgent: "test/0",
@@ -46,6 +83,15 @@ function mcp(toolNames: string[] = ["list_apps"]): McpServerStatusListResponse {
   };
 }
 
+afterEach(() => {
+  mockState.execFileError = undefined;
+  mockState.execFileStdout = "codex 1.2.3\n";
+  mockState.accessError = undefined;
+  mockState.clientRequests = [];
+  mockState.clientRequest = undefined;
+  mockState.clientStop.mockClear();
+});
+
 describe("evaluateComputerUseStatus", () => {
   it("reports codex_app_missing when app bundle missing and no marketplace has plugin", () => {
     const status = evaluateComputerUseStatus({
@@ -65,6 +111,16 @@ describe("evaluateComputerUseStatus", () => {
       mcp: mcp(),
     });
     expect(status.reason).toBe("marketplace_missing");
+  });
+
+  it("reports codex_app_missing before marketplace and plugin readiness checks", () => {
+    const status = evaluateComputerUseStatus({
+      codexAppExists: false,
+      appServer,
+      plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
+      mcp: mcp(["type_text", "list_apps"]),
+    });
+    expect(status.reason).toBe("codex_app_missing");
   });
 
   it("reports plugin_not_installed", () => {
@@ -130,5 +186,34 @@ describe("findPlugin", () => {
     ]), "computer-use");
 
     expect(match?.plugin.id).toBe("bundled");
+  });
+});
+
+describe("checkComputerUseStatus", () => {
+  it("returns codex_missing when codex --version fails", async () => {
+    mockState.execFileError = new Error("spawn codex ENOENT");
+
+    const status = await checkComputerUseStatus("/tmp/project");
+
+    expect(status.reason).toBe("codex_missing");
+    expect(status.error).toBe("spawn codex ENOENT");
+    expect(mockState.clientRequests).toEqual([]);
+    expect(mockState.clientStop).not.toHaveBeenCalled();
+  });
+
+  it("returns check_failed when app-server calls throw and still stops the client", async () => {
+    mockState.clientRequest = async (method: string) => {
+      if (method === "initialize") return appServer;
+      throw new Error("plugin list exploded");
+    };
+
+    const status = await checkComputerUseStatus("/tmp/project");
+
+    expect(status.reason).toBe("check_failed");
+    expect(status.codexVersion).toBe("codex 1.2.3");
+    expect(status.codexAppPath).toBe("/Applications/Codex.app");
+    expect(status.error).toBe("plugin list exploded");
+    expect(mockState.clientRequests).toEqual(["initialize", "plugin/list"]);
+    expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 });

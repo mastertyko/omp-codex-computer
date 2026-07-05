@@ -84,16 +84,23 @@ export async function checkComputerUseStatus(_cwd: string): Promise<ComputerUseS
 
 export function evaluateComputerUseStatus(input: StatusEvaluationInput): ComputerUseStatus {
   const { codexVersion, codexAppExists, appServer, plugins, mcp } = input;
+  if (!codexAppExists) {
+    return {
+      reason: "codex_app_missing",
+      message: `Codex app bundle was not found at ${DEFAULT_CODEX_APP_PATH}.`,
+      codexVersion,
+      appServer,
+    };
+  }
+
   const match = findPlugin(plugins, DEFAULT_PLUGIN_NAME);
   if (!match) {
     return {
-      reason: codexAppExists ? "marketplace_missing" : "codex_app_missing",
-      message: codexAppExists
-        ? `No Codex marketplace currently lists ${DEFAULT_PLUGIN_NAME}.`
-        : `Codex app bundle was not found at ${DEFAULT_CODEX_APP_PATH}.`,
+      reason: "marketplace_missing",
+      message: `No Codex marketplace currently lists ${DEFAULT_PLUGIN_NAME}.`,
       codexVersion,
       appServer,
-      codexAppPath: codexAppExists ? DEFAULT_CODEX_APP_PATH : undefined,
+      codexAppPath: DEFAULT_CODEX_APP_PATH,
     };
   }
 
