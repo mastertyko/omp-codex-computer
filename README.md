@@ -35,3 +35,24 @@ Inside OMP:
 ## Safety
 
 The extension does not automate the desktop directly. It calls Codex app-server, which owns the bundled Computer Use plugin lifecycle and permission flow. Permission requests fail closed when OMP has no UI available.
+
+## Verification
+
+Local automated checks:
+
+```bash
+bun run check
+```
+
+Local OMP smoke:
+
+```bash
+omp-dev -e .
+/codex-computer status
+```
+
+Verified on 2026-07-05 with OMP v16.3.6 and Codex CLI 0.142.5:
+
+- `bun run check` passed with 76 tests.
+- `/codex-computer status` reported Codex Computer Use ready.
+- A safe `computer_use_list_apps` model path listed available apps.
