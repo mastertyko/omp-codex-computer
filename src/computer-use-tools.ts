@@ -95,6 +95,8 @@ const COMPUTER_USE_TOOLS = [
   approval: "read" | "write";
 }>;
 
+export const COMPUTER_USE_MCP_TOOL_NAMES = Object.freeze(COMPUTER_USE_TOOLS.map((tool) => tool.mcpToolName));
+
 export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseRuntime): void {
   const parametersByTool = createParameterSchemas(pi);
 

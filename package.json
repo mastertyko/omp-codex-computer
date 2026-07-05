@@ -1,7 +1,7 @@
 {
   "name": "omp-codex-computer",
   "version": "0.1.0",
-  "description": "OMP extension for using OpenAI Codex Computer Use and Chrome through Codex app-server",
+  "description": "OMP extension for using OpenAI Codex Computer Use through Codex app-server",
   "type": "module",
   "main": "./src/index.ts",
   "files": [
@@ -19,8 +19,7 @@
     "omp",
     "oh-my-pi",
     "codex",
-    "computer-use",
-    "chrome"
+    "computer-use"
   ],
   "license": "MIT",
   "peerDependencies": {

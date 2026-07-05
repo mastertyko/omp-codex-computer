@@ -1,6 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AppServerClient, type ServerRequestResponder } from "./app-server-client";
-import { ChromeBackend, type ChromeToolResult } from "./chrome-backend";
 import { ComputerUseBackend, type ComputerUseToolResult } from "./computer-use-backend";
 import { logDebug } from "./log";
 import type { AppServerRequest, InitializeResponse } from "./protocol";
@@ -9,7 +8,6 @@ import { CodexThreadManager } from "./thread-manager";
 
 const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
 const COMPUTER_STATUS_KEY = "codex-computer";
-const CHROME_STATUS_KEY = "codex-chrome";
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 const PERMISSION_FALLBACK_MESSAGE = "Codex requests permission to continue.";
 
@@ -19,9 +17,7 @@ export class ComputerUseRuntime {
   readonly client = new AppServerClient({ requestTimeoutMs: 120_000 });
   readonly threads = new CodexThreadManager(this.client);
   readonly backend = new ComputerUseBackend(this.client, this.threads);
-  readonly chromeBackend = new ChromeBackend(this.client, this.threads);
   private readonly callToolQueue = new SerialQueue();
-  private readonly callChromeToolQueue = new SerialQueue();
 
   private latestContext: ExtensionContext | undefined;
   private initializePromise: Promise<InitializeResponse> | undefined;
@@ -46,7 +42,6 @@ export class ComputerUseRuntime {
     this.threads.reset();
     await this.client.stop();
     this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "idle");
-    this.setStatus(CHROME_STATUS_KEY, "Codex Chrome", "idle");
   }
 
   async initialize(): Promise<InitializeResponse> {
@@ -76,11 +71,6 @@ export class ComputerUseRuntime {
     return this.callToolQueue.enqueue(() => this.callToolOnce(ctx, tool, args));
   }
 
-  callChromeTool(ctx: ExtensionContext, tool: string, args: Record<string, unknown>): Promise<ChromeToolResult> {
-    this.clearIdleTimer();
-    return this.callChromeToolQueue.enqueue(() => this.callChromeToolOnce(ctx, tool, args));
-  }
-
   private async callToolOnce(
     ctx: ExtensionContext,
     tool: string,
@@ -103,28 +93,6 @@ export class ComputerUseRuntime {
     }
   }
 
-  private async callChromeToolOnce(
-    ctx: ExtensionContext,
-    tool: string,
-    args: Record<string, unknown>,
-  ): Promise<ChromeToolResult> {
-    this.setContext(ctx);
-    this.clearIdleTimer();
-    this.setStatus(CHROME_STATUS_KEY, "Codex Chrome", `working: ${tool}`);
-
-    try {
-      await this.initialize();
-      const result = await this.chromeBackend.callTool(ctx.cwd, tool, args);
-      this.setStatus(CHROME_STATUS_KEY, "Codex Chrome", "ready");
-      return result;
-    } catch (error) {
-      this.setStatus(CHROME_STATUS_KEY, "Codex Chrome", "error");
-      throw error;
-    } finally {
-      this.scheduleIdleShutdown();
-    }
-  }
-
   async handleServerRequestForTest(request: AppServerRequest, responder: ServerRequestResponder): Promise<void> {
     await this.handleServerRequest(request, responder);
   }
@@ -141,7 +109,6 @@ export class ComputerUseRuntime {
     const params = getElicitationParams(request.params);
     const message = params.message ?? PERMISSION_FALLBACK_MESSAGE;
     this.setStatus(COMPUTER_STATUS_KEY, "Codex Computer", "permission");
-    this.setStatus(CHROME_STATUS_KEY, "Codex Chrome", "permission");
     logDebug("elicitation.request", {
       method: request.method,
       serverName: params.serverName,

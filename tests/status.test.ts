@@ -31,7 +31,7 @@ vi.mock("../src/app-server-client", () => ({
         if (mockState.clientRequest) return mockState.clientRequest(method);
         if (method === "initialize") return appServer;
         if (method === "plugin/list") return plugins([{ name: "openai-bundled", plugin: plugin() }]);
-        if (method === "mcpServerStatus/list") return mcp(["list_apps"]);
+        if (method === "mcpServerStatus/list") return mcp();
         throw new Error(`unexpected method ${method}`);
       }),
       stop: mockState.clientStop,
@@ -45,6 +45,19 @@ const appServer: InitializeResponse = {
   platformFamily: "unix",
   platformOs: "macos",
 };
+
+const REQUIRED_MCP_TOOL_NAMES = [
+  "list_apps",
+  "get_app_state",
+  "click",
+  "type_text",
+  "press_key",
+  "scroll",
+  "drag",
+  "set_value",
+  "select_text",
+  "perform_secondary_action",
+] as const;
 
 function plugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
   return {
@@ -69,7 +82,10 @@ function plugins(entries: Array<{ name: string; path?: string | null; plugin?: P
   };
 }
 
-function mcp(toolNames: string[] = ["list_apps"]): McpServerStatusListResponse {
+function mcp(
+  toolNames: string[] = [...REQUIRED_MCP_TOOL_NAMES],
+  inputSchemas: Record<string, unknown> = {},
+): McpServerStatusListResponse {
   return {
     data: [
       {
@@ -77,7 +93,7 @@ function mcp(toolNames: string[] = ["list_apps"]): McpServerStatusListResponse {
         authStatus: "unsupported",
         resources: [],
         resourceTemplates: [],
-        tools: Object.fromEntries(toolNames.map((name) => [name, { name, inputSchema: {} }])),
+        tools: Object.fromEntries(toolNames.map((name) => [name, { name, inputSchema: inputSchemas[name] ?? {} }])),
       },
     ],
   };
@@ -153,26 +169,57 @@ describe("evaluateComputerUseStatus", () => {
     expect(status.reason).toBe("mcp_missing");
   });
 
-  it("reports ready with sorted tool names", () => {
+  it("reports ready only when every required MCP tool is present", () => {
     const status = evaluateComputerUseStatus({
       codexAppExists: true,
       appServer,
       plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
-      mcp: mcp(["type_text", "list_apps"]),
+      mcp: mcp(),
     });
     expect(status.reason).toBe("ready");
-    expect(status.mcpServer?.toolNames).toEqual(["list_apps", "type_text"]);
+    expect(status.mcpServer?.toolNames).toEqual([...REQUIRED_MCP_TOOL_NAMES].sort());
+    expect(status.missingToolNames).toBeUndefined();
   });
 
-  it("formats status without exposing payloads", () => {
+  it("allows extra MCP tools once every required tool is present", () => {
+    const status = evaluateComputerUseStatus({
+      codexAppExists: true,
+      appServer,
+      plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
+      mcp: mcp([...REQUIRED_MCP_TOOL_NAMES, "debug_tool"]),
+    });
+    expect(status.reason).toBe("ready");
+    expect(status.mcpServer?.toolNames).toEqual([...REQUIRED_MCP_TOOL_NAMES, "debug_tool"].sort());
+  });
+
+  it("reports mcp_incomplete with missing tool names for partial MCP exposure", () => {
+    const exposedToolNames = [...REQUIRED_MCP_TOOL_NAMES.slice(0, 3)];
+    const status = evaluateComputerUseStatus({
+      codexAppExists: true,
+      appServer,
+      plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
+      mcp: mcp(exposedToolNames),
+    });
+    expect(status.reason).toBe("mcp_incomplete");
+    expect(status.mcpServer?.toolNames).toEqual([...exposedToolNames].sort());
+    expect(status.missingToolNames).toEqual([...REQUIRED_MCP_TOOL_NAMES.slice(3)]);
+  });
+
+  it("formats missing MCP tool names without exposing tool payloads", () => {
     const text = formatComputerUseStatus(evaluateComputerUseStatus({
       codexAppExists: true,
       appServer,
       plugins: plugins([{ name: "openai-bundled", plugin: plugin() }]),
-      mcp: mcp(["list_apps"]),
+      mcp: mcp(["list_apps", "click"], {
+        list_apps: { secretToken: "list-secret" },
+        click: { traceId: "click-secret" },
+      }),
     }));
-    expect(text).toContain("Computer Use status: ready");
-    expect(text).toContain("MCP tools: list_apps");
+    expect(text).toContain("Computer Use status: mcp_incomplete");
+    expect(text).toContain("MCP tools: click, list_apps");
+    expect(text).toContain("Missing MCP tools: get_app_state, type_text, press_key, scroll, drag, set_value, select_text, perform_secondary_action");
+    expect(text).not.toContain("secret");
+    expect(text).not.toContain("inputSchema");
   });
 });
 
@@ -199,6 +246,16 @@ describe("checkComputerUseStatus", () => {
     expect(status.error).toBe("spawn codex ENOENT");
     expect(mockState.clientRequests).toEqual([]);
     expect(mockState.clientStop).not.toHaveBeenCalled();
+  });
+
+  it("returns ready only when the MCP server exposes every required tool", async () => {
+    const status = await checkComputerUseStatus("/tmp/project");
+
+    expect(status.reason).toBe("ready");
+    expect(status.mcpServer?.toolNames).toEqual([...REQUIRED_MCP_TOOL_NAMES].sort());
+    expect(status.missingToolNames).toBeUndefined();
+    expect(mockState.clientRequests).toEqual(["initialize", "plugin/list", "mcpServerStatus/list"]);
+    expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 
   it("returns check_failed when app-server calls throw and still stops the client", async () => {

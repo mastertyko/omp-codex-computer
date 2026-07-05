@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { AppServerClient } from "./app-server-client";
+import { COMPUTER_USE_MCP_TOOL_NAMES } from "./computer-use-tools";
 import type {
   InitializeResponse,
   McpServerStatusListResponse,
@@ -24,6 +25,7 @@ export type ComputerUseStatusReason =
   | "plugin_not_installed"
   | "plugin_disabled"
   | "mcp_missing"
+  | "mcp_incomplete"
   | "check_failed";
 
 export interface ComputerUseStatus {
@@ -35,6 +37,7 @@ export interface ComputerUseStatus {
   marketplace?: { name: string; path?: string | null };
   plugin?: PluginSummary;
   mcpServer?: { name: string; toolNames: string[] };
+  missingToolNames?: string[];
   error?: string;
 }
 
@@ -141,6 +144,22 @@ export function evaluateComputerUseStatus(input: StatusEvaluationInput): Compute
     };
   }
 
+  const toolNames = Object.keys(server.tools).sort();
+  const missingToolNames = COMPUTER_USE_MCP_TOOL_NAMES.filter((toolName) => !Object.hasOwn(server.tools, toolName));
+  if (missingToolNames.length > 0) {
+    return {
+      reason: "mcp_incomplete",
+      message: `${DEFAULT_MCP_SERVER_NAME} MCP server is missing required tools: ${missingToolNames.join(", ")}.`,
+      codexVersion,
+      appServer,
+      codexAppPath: codexAppExists ? DEFAULT_CODEX_APP_PATH : undefined,
+      marketplace: { name: match.marketplace.name, path: match.marketplace.path },
+      plugin: match.plugin,
+      mcpServer: { name: server.name, toolNames },
+      missingToolNames,
+    };
+  }
+
   return {
     reason: "ready",
     message: "Codex Computer Use is installed, enabled, and exposing MCP tools.",
@@ -149,7 +168,7 @@ export function evaluateComputerUseStatus(input: StatusEvaluationInput): Compute
     codexAppPath: codexAppExists ? DEFAULT_CODEX_APP_PATH : undefined,
     marketplace: { name: match.marketplace.name, path: match.marketplace.path },
     plugin: match.plugin,
-    mcpServer: { name: server.name, toolNames: Object.keys(server.tools).sort() },
+    mcpServer: { name: server.name, toolNames },
   };
 }
 
@@ -175,6 +194,7 @@ export function formatComputerUseStatus(status: ComputerUseStatus): string {
     lines.push(`MCP server: ${status.mcpServer.name}`);
     lines.push(`MCP tools: ${status.mcpServer.toolNames.join(", ")}`);
   }
+  if (status.missingToolNames?.length) lines.push(`Missing MCP tools: ${status.missingToolNames.join(", ")}`);
   if (status.error) lines.push(`Error: ${status.error}`);
 
   return lines.join("\n");
