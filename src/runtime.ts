@@ -3,6 +3,7 @@ import { AppServerClient, type ServerRequestResponder } from "./app-server-clien
 import { ComputerUseBackend, type ComputerUseToolResult } from "./computer-use-backend";
 import { logDebug } from "./log";
 import type { AppServerRequest, InitializeResponse } from "./protocol";
+import { SerialQueue } from "./queue";
 import { CodexThreadManager } from "./thread-manager";
 
 const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
@@ -16,6 +17,7 @@ export class ComputerUseRuntime {
   readonly client = new AppServerClient({ requestTimeoutMs: 120_000 });
   readonly threads = new CodexThreadManager(this.client);
   readonly backend = new ComputerUseBackend(this.client, this.threads);
+  private readonly callToolQueue = new SerialQueue();
 
   private latestContext: ExtensionContext | undefined;
   private initializePromise: Promise<InitializeResponse> | undefined;
@@ -48,14 +50,32 @@ export class ComputerUseRuntime {
       this.threads.reset();
     }
 
-    this.initializePromise ??= this.client.request<InitializeResponse>("initialize", {
-      clientInfo: CLIENT_INFO,
-      capabilities: { experimentalApi: true },
-    });
-    return this.initializePromise;
+    if (this.initializePromise) return this.initializePromise;
+
+    const initializePromise = this.client
+      .request<InitializeResponse>("initialize", {
+        clientInfo: CLIENT_INFO,
+        capabilities: { experimentalApi: true },
+      })
+      .catch((error: unknown) => {
+        if (this.initializePromise === initializePromise) this.initializePromise = undefined;
+        throw error;
+      });
+
+    this.initializePromise = initializePromise;
+    return initializePromise;
   }
 
-  async callTool(ctx: ExtensionContext, tool: string, args: Record<string, unknown>): Promise<ComputerUseToolResult> {
+  callTool(ctx: ExtensionContext, tool: string, args: Record<string, unknown>): Promise<ComputerUseToolResult> {
+    this.clearIdleTimer();
+    return this.callToolQueue.enqueue(() => this.callToolOnce(ctx, tool, args));
+  }
+
+  private async callToolOnce(
+    ctx: ExtensionContext,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<ComputerUseToolResult> {
     this.setContext(ctx);
     this.clearIdleTimer();
     this.setStatus(typeof args.app === "string" ? `working: ${args.app}` : "working");
@@ -109,11 +129,19 @@ export class ComputerUseRuntime {
     }
 
     const signal = (ctx as ContextWithSignal).signal;
-    const approved = await ctx.ui.confirm(
-      "Codex Computer Use permission",
-      message,
-      signal ? { signal } : undefined,
-    );
+    let approved: boolean;
+    try {
+      approved = await ctx.ui.confirm(
+        "Codex Computer Use permission",
+        message,
+        signal ? { signal } : undefined,
+      );
+    } catch {
+      logDebug("elicitation.decline.confirm-error", { serverName: params.serverName });
+      responder.accept({ action: "decline", content: null });
+      return;
+    }
+
     logDebug(approved ? "elicitation.accept.user" : "elicitation.decline.user", { serverName: params.serverName });
     responder.accept({ action: approved ? "accept" : "decline", content: approved ? {} : null });
   }
