@@ -51,17 +51,16 @@ Before opening a pull request:
 
 NPM releases are automated by the `Release` GitHub Actions workflow. The workflow runs for pushes to `main`, completed auto-merge workflows, and manual dispatch. For every unreleased merge commit it computes the next patch version from the latest `vX.Y.Z` tag.
 
-If the merge did not already bump `package.json`, the workflow opens a `chore/release-vX.Y.Z` pull request, enables auto-merge for it, and stops. When that release PR merges, the same workflow publishes the package from the release-version commit:
+The workflow applies the computed version to `package.json`, validates the package, commits that release version on a `chore/release-vX.Y.Z` branch, and tags the release commit. The release commit is the source for npm provenance and GitHub release notes, so protected `main` never needs a direct bot push.
 
 1. Runs `bun run check`.
 2. Verifies package contents with `npm pack --dry-run`.
 3. Publishes the package to npm with provenance when that package version is not already on npm.
 4. Creates GitHub release notes with the new `vX.Y.Z` tag using generated notes.
 
-Repository requirements:
+Repository requirement:
 
 1. `NPM_TOKEN` must be configured for npm publishing.
-2. `RELEASE_TOKEN` must be configured with permission to push the release-version branch and create/auto-merge the release PR. Use a token that can trigger workflows from its branch push so the release PR gets CI.
 
 Do not manually bump `package.json` for normal feature PRs; the release workflow owns patch-version bumps after merge. The `Publish npm package` workflow remains available as an idempotent manual fallback from a GitHub release or workflow dispatch.
 
