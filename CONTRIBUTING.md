@@ -49,7 +49,9 @@ Before opening a pull request:
 
 ## Releases
 
-NPM releases are automated by the `Release` GitHub Actions workflow. The workflow runs for pushes to `main`, completed auto-merge workflows, and manual dispatch. For every unreleased merge commit it computes the next patch version from the latest `vX.Y.Z` tag, updates `package.json`, commits that release version back to `main`, and then:
+NPM releases are automated by the `Release` GitHub Actions workflow. The workflow runs for pushes to `main`, completed auto-merge workflows, and manual dispatch. For every unreleased merge commit it computes the next patch version from the latest `vX.Y.Z` tag.
+
+If the merge did not already bump `package.json`, the workflow opens a `chore/release-vX.Y.Z` pull request, enables auto-merge for it, and stops. When that release PR merges, the same workflow publishes the package from the release-version commit:
 
 1. Runs `bun run check`.
 2. Verifies package contents with `npm pack --dry-run`.
@@ -59,7 +61,7 @@ NPM releases are automated by the `Release` GitHub Actions workflow. The workflo
 Repository requirements:
 
 1. `NPM_TOKEN` must be configured for npm publishing.
-2. `RELEASE_TOKEN` should be configured with permission to push the release-version commit to protected `main`. If it is absent, the workflow falls back to `GITHUB_TOKEN`, which only works when branch protection allows GitHub Actions to push.
+2. `RELEASE_TOKEN` must be configured with permission to push the release-version branch and create/auto-merge the release PR. Use a token that can trigger workflows from its branch push so the release PR gets CI.
 
 Do not manually bump `package.json` for normal feature PRs; the release workflow owns patch-version bumps after merge. The `Publish npm package` workflow remains available as an idempotent manual fallback from a GitHub release or workflow dispatch.
 
