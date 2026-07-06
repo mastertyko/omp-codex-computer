@@ -119,8 +119,11 @@ export class AppServerClient {
     method: string,
     params?: unknown,
     timeoutMs = this.options.requestTimeoutMs ?? 30_000,
+    signal?: AbortSignal,
   ): Promise<TResult> {
     this.start();
+
+    if (signal?.aborted) throw createAbortError(`Aborted Codex app-server request to ${method}`);
 
     const child = this.process;
     if (!child) throw new Error("Codex app-server process is not running");
@@ -130,22 +133,47 @@ export class AppServerClient {
     const payload = `${JSON.stringify(message)}\n`;
 
     return new Promise<TResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      let onAbort: (() => void) | undefined;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
         this.pending.delete(id);
-        reject(new Error(`Timed out waiting for Codex app-server response to ${method}`));
+      };
+      const resolveOnce = (value: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value as TResult);
+      };
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      timer = setTimeout(() => {
+        rejectOnce(new Error(`Timed out waiting for Codex app-server response to ${method}`));
       }, timeoutMs);
+      onAbort = () => rejectOnce(createAbortError(`Aborted Codex app-server request to ${method}`));
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       this.pending.set(id, {
-        resolve: (value) => resolve(value as TResult),
-        reject,
+        resolve: resolveOnce,
+        reject: rejectOnce,
         timer,
       });
 
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+
       child.stdin.write(payload, (error) => {
         if (!error) return;
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(error);
+        rejectOnce(error);
       });
     });
   }
@@ -257,4 +285,10 @@ export class AppServerClient {
       this.pending.delete(id);
     }
   }
+}
+
+function createAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
 }

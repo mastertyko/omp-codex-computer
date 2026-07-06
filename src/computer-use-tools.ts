@@ -113,11 +113,13 @@ export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseR
       async execute(
         _toolCallId: string,
         params: Record<string, unknown>,
-        _signal: AbortSignal | undefined,
+        signal: AbortSignal | undefined,
         _onUpdate: unknown,
         ctx: ExtensionContext,
       ) {
-        const result = await runtime.callTool(ctx, tool.mcpToolName, params as Record<string, unknown>);
+        const result = signal
+          ? await runtime.callTool(ctx, tool.mcpToolName, params as Record<string, unknown>, signal)
+          : await runtime.callTool(ctx, tool.mcpToolName, params as Record<string, unknown>);
         return {
           content: result.content,
           details: summarizeResult(result),

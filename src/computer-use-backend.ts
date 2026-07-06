@@ -40,11 +40,17 @@ export class ComputerUseBackend {
     this.mcpServerName = options.mcpServerName ?? "computer-use";
   }
 
-  async callTool(cwd: string, tool: string, args: Record<string, unknown>): Promise<ComputerUseToolResult> {
+  async callTool(
+    cwd: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ComputerUseToolResult> {
     return this.queue.enqueue(async () => {
+      throwIfAborted(signal, `Aborted Computer Use tool call ${tool}`);
       logDebug("computer-use.tool.start", { tool, argKeys: Object.keys(args) });
       try {
-        return await this.callToolOnce(cwd, tool, args);
+        return await this.callToolOnce(cwd, tool, args, signal);
       } catch (error) {
         if (error instanceof McpToolCallError) throw error;
 
@@ -53,19 +59,25 @@ export class ComputerUseBackend {
 
         logDebug("computer-use.tool.retry-thread", { tool });
         this.threads.reset();
-        return this.callToolOnce(cwd, tool, args);
+        return this.callToolOnce(cwd, tool, args, signal);
       }
     });
   }
 
-  private async callToolOnce(cwd: string, tool: string, args: Record<string, unknown>): Promise<ComputerUseToolResult> {
+  private async callToolOnce(
+    cwd: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ComputerUseToolResult> {
     const threadId = await this.threads.getThreadId(cwd);
+    throwIfAborted(signal, `Aborted Computer Use tool call ${tool}`);
     const response = await this.client.request<RawMcpToolCallResponse>("mcpServer/tool/call", {
       server: this.mcpServerName,
       threadId,
       tool,
       arguments: args,
-    });
+    }, undefined, signal);
 
     if (response.isError) {
       logDebug("computer-use.tool.error", { tool });
@@ -85,4 +97,12 @@ export class ComputerUseBackend {
       meta: response._meta,
     };
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, message: string): void {
+  if (!signal?.aborted) return;
+
+  const error = new Error(message);
+  error.name = "AbortError";
+  throw error;
 }

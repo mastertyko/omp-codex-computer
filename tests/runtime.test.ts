@@ -6,6 +6,7 @@ import { ComputerUseRuntime, shouldDevAutoAccept } from "../src/runtime";
 
 const originalDevAutoAcceptApps = process.env.OMP_CODEX_COMPUTER_DEV_AUTO_ACCEPT_APPS;
 const originalStatusVisibility = process.env.OMP_CODEX_COMPUTER_STATUS;
+const originalIdleTimeoutMs = process.env.OMP_CODEX_COMPUTER_IDLE_TIMEOUT_MS;
 class FakeResponder implements ServerRequestResponder {
   accepted: unknown[] = [];
   rejected: Array<{ code: number; message: string; data?: unknown }> = [];
@@ -166,6 +167,12 @@ describe("ComputerUseRuntime lifecycle", () => {
     } else {
       process.env.OMP_CODEX_COMPUTER_STATUS = originalStatusVisibility;
     }
+
+    if (originalIdleTimeoutMs === undefined) {
+      delete process.env.OMP_CODEX_COMPUTER_IDLE_TIMEOUT_MS;
+    } else {
+      process.env.OMP_CODEX_COMPUTER_IDLE_TIMEOUT_MS = originalIdleTimeoutMs;
+    }
   });
 
   it("retries initialize after a rejected request while the client is still running", async () => {
@@ -235,6 +242,57 @@ describe("ComputerUseRuntime lifecycle", () => {
     secondResult.resolve({ content: [] });
     await expect(second).resolves.toEqual({ content: [] });
   });
+
+  it("stops the client and returns to idle when the active tool signal aborts mid-call", async () => {
+    const controller = new AbortController();
+    const setStatus = vi.fn();
+    let running = true;
+    const abortError = new Error("tool aborted");
+    abortError.name = "AbortError";
+
+    const backend = {
+      callTool: vi.fn(
+        async (_cwd: string, _tool: string, _args: Record<string, unknown>, signal?: AbortSignal) => {
+          if (!signal) throw new Error("missing signal");
+
+          return await new Promise<{ content: [] }>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(abortError), { once: true });
+          });
+        },
+      ),
+    };
+    const client = {
+      isRunning: () => running,
+      request: vi.fn(async () => ({
+        userAgent: "test",
+        codexHome: "/tmp/codex",
+        platformFamily: "test",
+        platformOs: "test",
+      })),
+      stop: vi.fn(async () => {
+        running = false;
+      }),
+      onServerRequest: () => undefined,
+    };
+    const runtime = new ComputerUseRuntime();
+    const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+    runtimeInternals.client = client;
+    runtimeInternals.backend = backend;
+
+    const ctx = createContext("/tmp/project", async () => true, setStatus);
+    const call = runtime.callTool(ctx, "inspect", { app: "Safari" }, controller.signal);
+    await flushPromises();
+    expect(backend.callTool).toHaveBeenCalledWith("/tmp/project", "inspect", { app: "Safari" }, controller.signal);
+
+    controller.abort();
+
+    await expect(call).rejects.toMatchObject({ name: "AbortError", message: "tool aborted" });
+    await flushPromises();
+
+    expect(client.stop).toHaveBeenCalledTimes(1);
+    expect(running).toBe(false);
+    expect(setStatus).toHaveBeenCalledWith("codex-computer", "Codex 💻: idle");
+  });
   it("clears the footer when hidden, suppresses hidden updates, and restores the latest status when shown", async () => {
     const setStatus = vi.fn();
     const runtime = new ComputerUseRuntime();
@@ -275,6 +333,51 @@ describe("ComputerUseRuntime lifecycle", () => {
     runtime.setStatusVisible(true);
 
     expect(setStatus).toHaveBeenNthCalledWith(5, "codex-computer", "Codex 💻: permission");
+  });
+
+  it("stops the client after the idle timeout elapses following a successful tool call", async () => {
+    vi.useFakeTimers();
+    process.env.OMP_CODEX_COMPUTER_IDLE_TIMEOUT_MS = "20";
+
+    try {
+      const setStatus = vi.fn();
+      let running = true;
+      const backend = {
+        callTool: vi.fn(async () => ({ content: [] })),
+      };
+      const client = {
+        isRunning: () => running,
+        request: vi.fn(async () => ({
+          userAgent: "test",
+          codexHome: "/tmp/codex",
+          platformFamily: "test",
+          platformOs: "test",
+        })),
+        stop: vi.fn(async () => {
+          running = false;
+        }),
+        onServerRequest: () => undefined,
+      };
+      const runtime = new ComputerUseRuntime();
+      const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+      runtimeInternals.client = client;
+      runtimeInternals.backend = backend;
+
+      const ctx = createContext("/tmp/project", async () => true, setStatus);
+      await runtime.callTool(ctx, "inspect", { app: "Safari" });
+
+      expect(client.stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(19);
+      expect(client.stop).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(client.stop).toHaveBeenCalledTimes(1);
+      expect(running).toBe(false);
+      expect(setStatus).toHaveBeenCalledWith("codex-computer", "Codex 💻: idle");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("defaults the footer to hidden when OMP_CODEX_COMPUTER_STATUS=off and clears the status key on context set", () => {
