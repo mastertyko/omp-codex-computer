@@ -44,6 +44,16 @@ The extension registers `computer_use_*` tools for native macOS app inspection a
 
 Use `omp-dev -e .` for a local smoke test without installing the package.
 
+## Uninstallation
+
+Uninstall the OMP plugin by package/plugin name:
+
+```bash
+omp plugin uninstall omp-codex-computer
+```
+
+Use `omp plugin list` to confirm the plugin is no longer installed.
+
 ## Commands
 
 - `/codex-computer status` — checks Codex CLI/app, the bundled `computer-use` plugin, required MCP tools, and reports additional upstream MCP tools not exposed by this adapter.
