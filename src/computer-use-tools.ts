@@ -3,7 +3,7 @@ import type { OmpContentBlock } from "./content";
 import type { ComputerUseToolResult } from "./computer-use-backend";
 import type { ComputerUseRuntime } from "./runtime";
 
-export const COMPUTER_USE_TOOL_NAMES = [
+const COMPUTER_USE_UPSTREAM_TOOL_NAMES = [
   "computer_use_list_apps",
   "computer_use_get_app_state",
   "computer_use_click",
@@ -16,19 +16,31 @@ export const COMPUTER_USE_TOOL_NAMES = [
   "computer_use_perform_secondary_action",
 ] as const;
 
-const COMPUTER_USE_TOOLS = [
+const COMPUTER_USE_LOCAL_TOOL_NAMES = ["computer_use_resolve_app"] as const;
+
+export const COMPUTER_USE_TOOL_NAMES = [
+  ...COMPUTER_USE_UPSTREAM_TOOL_NAMES,
+  ...COMPUTER_USE_LOCAL_TOOL_NAMES,
+] as const;
+
+type ComputerUseToolName = (typeof COMPUTER_USE_TOOL_NAMES)[number];
+type UpstreamComputerUseToolName = (typeof COMPUTER_USE_UPSTREAM_TOOL_NAMES)[number];
+type LocalComputerUseToolName = (typeof COMPUTER_USE_LOCAL_TOOL_NAMES)[number];
+type ComputerUseToolApproval = "read" | "write";
+
+const COMPUTER_USE_UPSTREAM_TOOLS = [
   {
     name: "computer_use_list_apps",
     mcpToolName: "list_apps",
     label: "List Apps",
-    description: "List visible applications and windows available for Computer Use.",
+    description: "List applications currently known to Computer Use. This may omit unbundled macOS GUI processes launched as raw executables; use computer_use_resolve_app when a running local app is missing.",
     approval: "read",
   },
   {
     name: "computer_use_get_app_state",
     mcpToolName: "get_app_state",
     label: "Get App State",
-    description: "Inspect the current state of an application for Computer Use.",
+    description: "Inspect the current state of an application for Computer Use. Prefer stable app targets such as bundle id or .app path over display name. If this returns Invalid app for a local development GUI process, call computer_use_resolve_app; raw executables may have visible windows but be missing from the Computer Use app index.",
     approval: "read",
   },
   {
@@ -88,19 +100,33 @@ const COMPUTER_USE_TOOLS = [
     approval: "write",
   },
 ] as const satisfies ReadonlyArray<{
-  name: (typeof COMPUTER_USE_TOOL_NAMES)[number];
+  name: UpstreamComputerUseToolName;
   mcpToolName: string;
   label: string;
   description: string;
-  approval: "read" | "write";
+  approval: ComputerUseToolApproval;
 }>;
 
-export const COMPUTER_USE_MCP_TOOL_NAMES = Object.freeze(COMPUTER_USE_TOOLS.map((tool) => tool.mcpToolName));
+const COMPUTER_USE_LOCAL_TOOLS = [
+  {
+    name: "computer_use_resolve_app",
+    label: "Resolve App",
+    description: "Resolve an application target before using Computer Use. Diagnoses missing registered apps, raw executable paths, PID targets, and bundle id/.app path recommendations without controlling the desktop.",
+    approval: "read",
+  },
+] as const satisfies ReadonlyArray<{
+  name: LocalComputerUseToolName;
+  label: string;
+  description: string;
+  approval: ComputerUseToolApproval;
+}>;
+
+export const COMPUTER_USE_MCP_TOOL_NAMES = Object.freeze(COMPUTER_USE_UPSTREAM_TOOLS.map((tool) => tool.mcpToolName));
 
 export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseRuntime): void {
   const parametersByTool = createParameterSchemas(pi);
 
-  for (const tool of COMPUTER_USE_TOOLS) {
+  for (const tool of COMPUTER_USE_UPSTREAM_TOOLS) {
     const definition = {
       name: tool.name,
       label: tool.label,
@@ -128,11 +154,54 @@ export function registerComputerUseTools(pi: ExtensionAPI, runtime: ComputerUseR
     };
     pi.registerTool(definition as Parameters<ExtensionAPI["registerTool"]>[0]);
   }
+
+  for (const tool of COMPUTER_USE_LOCAL_TOOLS) {
+    const definition = {
+      name: tool.name,
+      label: tool.label,
+      description: tool.description,
+      parameters: parametersByTool[tool.name],
+      defaultInactive: true,
+      approval: tool.approval,
+      async execute(
+        _toolCallId: string,
+        params: Record<string, unknown>,
+        signal: AbortSignal | undefined,
+        _onUpdate: unknown,
+        ctx: ExtensionContext,
+      ) {
+        return executeLocalTool(tool.name, runtime, params, signal, ctx);
+      },
+    };
+    pi.registerTool(definition as Parameters<ExtensionAPI["registerTool"]>[0]);
+  }
 }
 
-function createParameterSchemas(pi: ExtensionAPI): Record<(typeof COMPUTER_USE_TOOL_NAMES)[number], unknown> {
+async function executeLocalTool(
+  toolName: LocalComputerUseToolName,
+  runtime: ComputerUseRuntime,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
+) {
+  switch (toolName) {
+    case "computer_use_resolve_app": {
+      const app = typeof params.app === "string" ? params.app : "";
+      const result = signal
+        ? await runtime.resolveAppTarget(ctx, app, signal)
+        : await runtime.resolveAppTarget(ctx, app);
+      return {
+        content: result.content,
+        details: summarizeResult(result),
+      };
+    }
+  }
+}
+
+function createParameterSchemas(pi: ExtensionAPI): Record<ComputerUseToolName, unknown> {
   const z = pi.zod;
   const app = z.string().describe("The application to inspect or control.");
+  const appTarget = z.string().describe("Application name, bundle id, .app path, executable path, PID string, or window owner name to resolve.");
   const elementIndex = z.string().describe("The target element index from the app state.");
 
   return {
@@ -186,6 +255,9 @@ function createParameterSchemas(pi: ExtensionAPI): Record<(typeof COMPUTER_USE_T
       app,
       element_index: elementIndex,
       action: z.string().describe("The secondary action to perform."),
+    }).passthrough(),
+    computer_use_resolve_app: z.object({
+      app: appTarget,
     }).passthrough(),
   };
 }

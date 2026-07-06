@@ -116,6 +116,58 @@ export class ComputerUseRuntime {
     return this.callToolQueue.enqueue(() => this.callToolOnce(runtimeContext, tool, args));
   }
 
+  resolveAppTarget(ctx: ExtensionContext, app: string, signal?: AbortSignal): Promise<ComputerUseToolResult> {
+    const contextSignal = signal ?? (ctx as ContextWithSignal).signal;
+    if (contextSignal?.aborted) return Promise.reject(createAbortError(`Aborted Computer Use app target resolution for ${app}`));
+
+    const runtimeContext = contextSignal && !(ctx as ContextWithSignal).signal
+      ? ({ ...ctx, signal: contextSignal } as ExtensionContext)
+      : ctx;
+
+    this.clearIdleTimer();
+    return this.callToolQueue.enqueue(() => this.resolveAppTargetOnce(runtimeContext, app));
+  }
+
+  private async resolveAppTargetOnce(ctx: ExtensionContext, app: string): Promise<ComputerUseToolResult> {
+    const signal = (ctx as ContextWithSignal).signal;
+    this.setContext(ctx);
+
+    const abortShutdown = () => {
+      void this.shutdown().catch((error: unknown) => {
+        logDebug("runtime.shutdown.abort-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    };
+    signal?.addEventListener("abort", abortShutdown, { once: true });
+
+    if (signal?.aborted) {
+      abortShutdown();
+      throw createAbortError(`Aborted Computer Use app target resolution for ${app}`);
+    }
+
+    this.clearIdleTimer();
+    this.setStatus(`resolving: ${app}`);
+
+    try {
+      await this.initialize();
+      if (signal?.aborted) throw createAbortError(`Aborted Computer Use app target resolution for ${app}`);
+      const result = await this.backend.resolveAppTarget(ctx.cwd, app, signal);
+      this.setStatus("ready");
+      return result;
+    } catch (error) {
+      if (signal?.aborted) {
+        this.setStatus("idle");
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        throw createAbortError(`Aborted Computer Use app target resolution for ${app}`);
+      }
+
+      this.setStatus("error");
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", abortShutdown);
+      if (!signal?.aborted) this.scheduleIdleShutdown();
+    }
+  }
+
   private async callToolOnce(
     ctx: ExtensionContext,
     tool: string,
