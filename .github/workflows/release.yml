@@ -11,7 +11,7 @@ on:
 permissions:
   contents: write
   id-token: write
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: release-main
@@ -162,9 +162,55 @@ jobs:
           fs.writeFileSync("package.json", `${JSON.stringify(pkg, null, 2)}\n`);
           NODE
 
+      - name: Create release version pull request
+        id: release_pr
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- package.json; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_TOKEN is required to create the protected-branch release PR and trigger its checks." >&2
+            exit 1
+          fi
+
+          branch="chore/release-${RELEASE_TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add package.json
+          git commit -m "chore: release $RELEASE_TAG"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"$branch" --force
+
+          if pr_url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null); then
+            echo "Release PR already exists: $pr_url"
+          else
+            pr_url=$(gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: release $RELEASE_TAG" \
+              --body "Automated release version bump for $RELEASE_TAG.")
+          fi
+
+          gh pr merge "$pr_url" --auto --merge
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Explain release pull request
+        if: steps.release_pr.outputs.created == 'true'
+        run: |
+          echo "Release PR created and auto-merge enabled: ${{ steps.release_pr.outputs.url }}"
+
       - name: Read package metadata
         id: package
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
         run: |
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
@@ -173,7 +219,7 @@ jobs:
 
       - name: Check whether npm version already exists
         id: npm_version
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
         run: |
           if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -182,47 +228,25 @@ jobs:
           fi
 
       - name: Install dependencies
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
         run: bun install --frozen-lockfile
 
       - name: Run checks
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
         run: bun run check
 
       - name: Verify package contents
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
         run: npm pack --dry-run
 
-      - name: Commit release version
-        id: release_commit
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json
-
-          if git diff --cached --quiet; then
-            release_sha=$(git rev-parse HEAD)
-          else
-            git commit -m "chore: release $RELEASE_TAG [skip ci]"
-            release_sha=$(git rev-parse HEAD)
-            git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
-          fi
-
-          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
-
       - name: Publish package to npm
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.npm_version.outputs.exists != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true' && steps.npm_version.outputs.exists != 'true'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub release notes
-        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
-        run: gh release create "${{ steps.version.outputs.tag }}" --target "${{ steps.release_commit.outputs.release_sha }}" --title "${{ steps.version.outputs.tag }}" --generate-notes
+        if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true' && steps.release_pr.outputs.created != 'true'
+        run: gh release create "${{ steps.version.outputs.tag }}" --target "${{ steps.target.outputs.release_sha }}" --title "${{ steps.version.outputs.tag }}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
