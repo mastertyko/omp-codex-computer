@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ComputerUseBackend } from "../src/computer-use-backend";
 
 function deferred<T>() {
@@ -103,6 +103,31 @@ describe("ComputerUseBackend", () => {
     );
     expect(threads.resetCount).toBe(0);
     expect(client.calls).toHaveLength(1);
+  });
+
+  it("retries once after the Computer Use app session was stopped by an MCP error", async () => {
+    const client = new FakeClient();
+    client.responses.push({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "This application session has been explicitly stopped by the user for this turn.",
+        },
+      ],
+    });
+    client.responses.push({ content: [{ type: "text", text: "ok" }] });
+    const threads = new FakeThreads();
+    threads.ids = ["thread-1", "thread-2"];
+    const resetStoppedSession = vi.fn(async () => {});
+    const backend = new ComputerUseBackend(client as never, threads as never, { resetStoppedSession });
+
+    const result = await backend.callTool("/tmp", "list_apps", {});
+
+    expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+    expect(threads.resetCount).toBe(1);
+    expect(resetStoppedSession).toHaveBeenCalledTimes(1);
+    expect(client.calls).toHaveLength(2);
   });
 
   it("retries once with a fresh thread when app-server forgot the thread", async () => {
