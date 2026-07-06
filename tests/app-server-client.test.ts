@@ -187,6 +187,26 @@ describe("AppServerClient", () => {
 
     await rejection;
   });
+  it("rejects aborted requests and ignores late responses", async () => {
+    const client = new AppServerClient({ requestTimeoutMs: 1000 });
+    attachFakeProcess(client);
+
+    const controller = new AbortController();
+    const request = client.request("abort-me", {}, 1000, controller.signal);
+    const settled = vi.fn();
+    request.then(settled, settled);
+
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(pendingCount(client)).toBe(0);
+
+    expect(() => deliver(client, { id: 1, result: "late" })).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(pendingCount(client)).toBe(0);
+  });
 
   it("does not write new requests to a child after stop has begun", async () => {
     const client = new AppServerClient();

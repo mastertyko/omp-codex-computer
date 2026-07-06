@@ -32,6 +32,7 @@ export class ComputerUseRuntime {
   private latestContext: ExtensionContext | undefined;
   private initializePromise: Promise<InitializeResponse> | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
+  private shutdownPromise: Promise<void> | undefined;
   private statusVisible = getStatusVisibleByDefault();
   private statusValue = "idle";
 
@@ -54,6 +55,18 @@ export class ComputerUseRuntime {
   }
 
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    const shutdownPromise = this.shutdownOnce();
+    this.shutdownPromise = shutdownPromise;
+    try {
+      await shutdownPromise;
+    } finally {
+      if (this.shutdownPromise === shutdownPromise) this.shutdownPromise = undefined;
+    }
+  }
+
+  private async shutdownOnce(): Promise<void> {
     logDebug("runtime.shutdown");
     this.clearIdleTimer();
     this.initializePromise = undefined;
@@ -63,11 +76,13 @@ export class ComputerUseRuntime {
   }
 
   async initialize(): Promise<InitializeResponse> {
+    const shutdownPromise = this.shutdownPromise;
+    if (shutdownPromise) await shutdownPromise;
+
     if (!this.client.isRunning()) {
       this.initializePromise = undefined;
       this.threads.reset();
     }
-
     if (this.initializePromise) return this.initializePromise;
 
     const initializePromise = this.client
@@ -84,9 +99,21 @@ export class ComputerUseRuntime {
     return initializePromise;
   }
 
-  callTool(ctx: ExtensionContext, tool: string, args: Record<string, unknown>): Promise<ComputerUseToolResult> {
+  callTool(
+    ctx: ExtensionContext,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ComputerUseToolResult> {
+    const contextSignal = signal ?? (ctx as ContextWithSignal).signal;
+    if (contextSignal?.aborted) return Promise.reject(createAbortError(`Aborted Computer Use tool call ${tool}`));
+
+    const runtimeContext = contextSignal && !(ctx as ContextWithSignal).signal
+      ? ({ ...ctx, signal: contextSignal } as ExtensionContext)
+      : ctx;
+
     this.clearIdleTimer();
-    return this.callToolQueue.enqueue(() => this.callToolOnce(ctx, tool, args));
+    return this.callToolQueue.enqueue(() => this.callToolOnce(runtimeContext, tool, args));
   }
 
   private async callToolOnce(
@@ -94,20 +121,42 @@ export class ComputerUseRuntime {
     tool: string,
     args: Record<string, unknown>,
   ): Promise<ComputerUseToolResult> {
+    const signal = (ctx as ContextWithSignal).signal;
     this.setContext(ctx);
+
+    const abortShutdown = () => {
+      void this.shutdown().catch((error: unknown) => {
+        logDebug("runtime.shutdown.abort-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    };
+    signal?.addEventListener("abort", abortShutdown, { once: true });
+
+    if (signal?.aborted) {
+      abortShutdown();
+      throw createAbortError(`Aborted Computer Use tool call ${tool}`);
+    }
+
     this.clearIdleTimer();
     this.setStatus(typeof args.app === "string" ? `working: ${args.app}` : "working");
 
     try {
       await this.initialize();
-      const result = await this.backend.callTool(ctx.cwd, tool, args);
+      if (signal?.aborted) throw createAbortError(`Aborted Computer Use tool call ${tool}`);
+      const result = await this.backend.callTool(ctx.cwd, tool, args, signal);
       this.setStatus("ready");
       return result;
     } catch (error) {
+      if (signal?.aborted) {
+        this.setStatus("idle");
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        throw createAbortError(`Aborted Computer Use tool call ${tool}`);
+      }
+
       this.setStatus("error");
       throw error;
     } finally {
-      this.scheduleIdleShutdown();
+      signal?.removeEventListener("abort", abortShutdown);
+      if (!signal?.aborted) this.scheduleIdleShutdown();
     }
   }
 
@@ -187,7 +236,9 @@ export class ComputerUseRuntime {
     if (timeoutMs === undefined) return;
 
     this.idleTimer = setTimeout(() => {
-      void this.shutdown();
+      void this.shutdown().catch((error: unknown) => {
+        logDebug("runtime.shutdown.idle-error", { message: error instanceof Error ? error.message : String(error) });
+      });
     }, timeoutMs);
     this.idleTimer.unref();
   }
@@ -232,4 +283,10 @@ function getIdleTimeoutMs(): number | undefined {
   const parsed = Number.parseInt(normalized, 10);
   if (parsed <= 0) return undefined;
   return parsed;
+}
+
+function createAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
 }

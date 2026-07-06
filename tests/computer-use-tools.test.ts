@@ -84,6 +84,25 @@ describe("registerComputerUseTools", () => {
     expect(JSON.stringify((result as { details: unknown }).details)).not.toContain("secret");
   });
 
+  it("forwards the provided AbortSignal into runtime tool calls", async () => {
+    const pi = createFakePi();
+    const runtime = {
+      callTool: vi.fn(async () => ({ content: [] })),
+    };
+    registerComputerUseTools(pi as never, runtime as unknown as ComputerUseRuntime);
+
+    const tool = pi.tools.find((entry) => (entry as { name: string }).name === "computer_use_click") as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+    const params = { app: "Finder", x: 12, y: 34 };
+    const controller = new AbortController();
+    const ctx = createContext();
+
+    await tool.execute("call-1", params, controller.signal, undefined, ctx);
+
+    expect(runtime.callTool).toHaveBeenCalledWith(ctx, "click", params, controller.signal);
+  });
+
   it("registers specific parameter schemas for model-visible tool arguments", () => {
     const pi = createFakePi();
     const runtime = { callTool: vi.fn() } as unknown as ComputerUseRuntime;
