@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { convertCodexContentToOmpContent, type OmpContentBlock } from "./content";
 import { logDebug } from "./log";
 import { SerialQueue } from "./queue";
@@ -6,6 +8,7 @@ import type { CodexThreadManager } from "./thread-manager";
 
 export interface ComputerUseBackendOptions {
   mcpServerName?: string;
+  resetStoppedSession?: () => Promise<void>;
 }
 
 export interface ComputerUseToolResult {
@@ -21,6 +24,16 @@ interface RawMcpToolCallResponse {
   isError?: boolean | null;
 }
 
+const execFileAsync = promisify(execFile);
+function textContentFromRawContent(content: unknown): string {
+  return convertCodexContentToOmpContent(content)
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+const STOPPED_APPLICATION_SESSION_TEXT = "This application session has been explicitly stopped by the user for this turn.";
+
 class McpToolCallError extends Error {
   constructor(message: string) {
     super(message);
@@ -28,9 +41,17 @@ class McpToolCallError extends Error {
   }
 }
 
+class ComputerUseSessionStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ComputerUseSessionStoppedError";
+  }
+}
+
 export class ComputerUseBackend {
   private readonly queue = new SerialQueue();
   private readonly mcpServerName: string;
+  private readonly resetStoppedSession: () => Promise<void>;
 
   constructor(
     private readonly client: Pick<AppServerClient, "request">,
@@ -38,6 +59,7 @@ export class ComputerUseBackend {
     options: ComputerUseBackendOptions = {},
   ) {
     this.mcpServerName = options.mcpServerName ?? "computer-use";
+    this.resetStoppedSession = options.resetStoppedSession ?? resetStoppedComputerUseSession;
   }
 
   async callTool(
@@ -53,6 +75,13 @@ export class ComputerUseBackend {
         return await this.callToolOnce(cwd, tool, args, signal);
       } catch (error) {
         if (error instanceof McpToolCallError) throw error;
+
+        if (error instanceof ComputerUseSessionStoppedError) {
+          logDebug("computer-use.tool.retry-stopped-session", { tool });
+          this.threads.reset();
+          await this.resetStoppedSession();
+          return this.callToolOnce(cwd, tool, args, signal);
+        }
 
         const message = error instanceof Error ? error.message : String(error);
         if (!/thread not found|invalid thread id/i.test(message)) throw error;
@@ -81,14 +110,18 @@ export class ComputerUseBackend {
 
     if (response.isError) {
       logDebug("computer-use.tool.error", { tool });
-      const text = convertCodexContentToOmpContent(response.content)
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n");
+      const text = textContentFromRawContent(response.content);
+      if (text.includes(STOPPED_APPLICATION_SESSION_TEXT)) throw new ComputerUseSessionStoppedError(text);
       throw new McpToolCallError(text || `${this.mcpServerName}.${tool} failed`);
     }
 
     const content = convertCodexContentToOmpContent(response.content);
+    const stoppedSessionText = content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .find((text) => text.includes(STOPPED_APPLICATION_SESSION_TEXT));
+    if (stoppedSessionText) throw new ComputerUseSessionStoppedError(stoppedSessionText);
+
     logDebug("computer-use.tool.end", { tool, contentTypes: content.map((block) => block.type).join(",") });
 
     return {
@@ -105,4 +138,15 @@ function throwIfAborted(signal: AbortSignal | undefined, message: string): void 
   const error = new Error(message);
   error.name = "AbortError";
   throw error;
+}
+
+async function resetStoppedComputerUseSession(): Promise<void> {
+  try {
+    await execFileAsync("killall", ["SkyComputerUseService"], { timeout: 2_000 });
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
+    if (code !== 1) throw error;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
 }
