@@ -29,16 +29,37 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Read package metadata
+        id: package
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether npm version already exists
+        id: npm_version
+        run: |
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
+        if: steps.npm_version.outputs.exists != 'true'
         run: bun install --frozen-lockfile
 
       - name: Run checks
+        if: steps.npm_version.outputs.exists != 'true'
         run: bun run check
 
       - name: Verify package contents
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm pack --dry-run
 
       - name: Publish package
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
