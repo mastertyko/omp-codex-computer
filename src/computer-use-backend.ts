@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { convertCodexContentToOmpContent, type OmpContentBlock } from "./content";
 import { logDebug } from "./log";
 import { SerialQueue } from "./queue";
+import { formatAppTargetResolution, formatInvalidAppDiagnostic, resolveAppTargetFromList } from "./app-target-resolver";
 import type { AppServerClient } from "./app-server-client";
 import type { CodexThreadManager } from "./thread-manager";
 
@@ -71,25 +72,27 @@ export class ComputerUseBackend {
     return this.queue.enqueue(async () => {
       throwIfAborted(signal, `Aborted Computer Use tool call ${tool}`);
       logDebug("computer-use.tool.start", { tool, argKeys: Object.keys(args) });
-      try {
-        return await this.callToolOnce(cwd, tool, args, signal);
-      } catch (error) {
-        if (error instanceof McpToolCallError) throw error;
+      return await this.callToolWithRetry(cwd, tool, args, signal);
+    });
+  }
 
-        if (error instanceof ComputerUseSessionStoppedError) {
-          logDebug("computer-use.tool.retry-stopped-session", { tool });
-          this.threads.reset();
-          await this.resetStoppedSession();
-          return this.callToolOnce(cwd, tool, args, signal);
-        }
+  async resolveAppTarget(cwd: string, app: string, signal?: AbortSignal): Promise<ComputerUseToolResult> {
+    return this.queue.enqueue(async () => {
+      throwIfAborted(signal, `Aborted Computer Use app target resolution for ${app}`);
+      logDebug("computer-use.resolve-app.start", { app });
+      const listApps = await this.callToolWithRetry(cwd, "list_apps", {}, signal);
+      const listAppsText = listApps.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      const resolution = resolveAppTargetFromList(app, listAppsText);
+      const text = formatAppTargetResolution(resolution);
+      logDebug("computer-use.resolve-app.end", { app, status: resolution.status });
 
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/thread not found|invalid thread id/i.test(message)) throw error;
-
-        logDebug("computer-use.tool.retry-thread", { tool });
-        this.threads.reset();
-        return this.callToolOnce(cwd, tool, args, signal);
-      }
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: resolution,
+      };
     });
   }
 
@@ -112,6 +115,9 @@ export class ComputerUseBackend {
       logDebug("computer-use.tool.error", { tool });
       const text = textContentFromRawContent(response.content);
       if (text.includes(STOPPED_APPLICATION_SESSION_TEXT)) throw new ComputerUseSessionStoppedError(text);
+      if (tool === "get_app_state" && /\binvalid app\b/i.test(text) && typeof args.app === "string") {
+        throw new McpToolCallError(await this.enrichInvalidAppError(cwd, args.app, text, signal));
+      }
       throw new McpToolCallError(text || `${this.mcpServerName}.${tool} failed`);
     }
 
@@ -129,6 +135,52 @@ export class ComputerUseBackend {
       structuredContent: response.structuredContent,
       meta: response._meta,
     };
+  }
+
+  private async callToolWithRetry(
+    cwd: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ComputerUseToolResult> {
+    try {
+      return await this.callToolOnce(cwd, tool, args, signal);
+    } catch (error) {
+      if (error instanceof McpToolCallError) throw error;
+
+      if (error instanceof ComputerUseSessionStoppedError) {
+        logDebug("computer-use.tool.retry-stopped-session", { tool });
+        this.threads.reset();
+        await this.resetStoppedSession();
+        return this.callToolOnce(cwd, tool, args, signal);
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/thread not found|invalid thread id/i.test(message)) throw error;
+
+      logDebug("computer-use.tool.retry-thread", { tool });
+      this.threads.reset();
+      return this.callToolOnce(cwd, tool, args, signal);
+    }
+  }
+
+  private async enrichInvalidAppError(
+    cwd: string,
+    app: string,
+    originalMessage: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    try {
+      const listApps = await this.callToolOnce(cwd, "list_apps", {}, signal);
+      const listAppsText = listApps.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      return formatInvalidAppDiagnostic(originalMessage, app, listAppsText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return formatInvalidAppDiagnostic(originalMessage, app, "", message);
+    }
   }
 }
 

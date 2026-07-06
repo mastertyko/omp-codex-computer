@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod/v4";
 import type { ComputerUseRuntime } from "../src/runtime";
-import { COMPUTER_USE_TOOL_NAMES, registerComputerUseTools } from "../src/computer-use-tools";
+import { COMPUTER_USE_MCP_TOOL_NAMES, COMPUTER_USE_TOOL_NAMES, registerComputerUseTools } from "../src/computer-use-tools";
 
 function createFakePi() {
   const tools: unknown[] = [];
@@ -21,7 +21,14 @@ function createContext() {
 function getRegisteredTool(pi: ReturnType<typeof createFakePi>, name: string) {
   const tool = pi.tools.find((entry) => (entry as { name: string }).name === name);
   if (!tool) throw new Error(`missing tool ${name}`);
-  return tool as { parameters: { safeParse: (value: unknown) => { success: boolean } } };
+  return tool as {
+    approval?: string;
+    defaultInactive?: boolean;
+    execute: (...args: unknown[]) => Promise<unknown>;
+    mcpServerName?: string;
+    mcpToolName?: string;
+    parameters: { safeParse: (value: unknown) => { success: boolean } };
+  };
 }
 
 describe("registerComputerUseTools", () => {
@@ -42,8 +49,54 @@ describe("registerComputerUseTools", () => {
       "computer_use_set_value",
       "computer_use_select_text",
       "computer_use_perform_secondary_action",
+      "computer_use_resolve_app",
     ]);
     expect(pi.tools.map((tool) => (tool as { name: string }).name)).toEqual(COMPUTER_USE_TOOL_NAMES);
+  });
+
+  it("keeps local diagnostic tools out of the upstream MCP tool requirement list", () => {
+    expect(COMPUTER_USE_MCP_TOOL_NAMES).toEqual([
+      "list_apps",
+      "get_app_state",
+      "click",
+      "type_text",
+      "press_key",
+      "scroll",
+      "drag",
+      "set_value",
+      "select_text",
+      "perform_secondary_action",
+    ]);
+    expect(COMPUTER_USE_MCP_TOOL_NAMES).not.toContain("computer_use_resolve_app");
+  });
+
+  it("registers resolve-app as a local read-only diagnostic tool and executes it without forwarding to upstream MCP", async () => {
+    const pi = createFakePi();
+    const ctx = createContext();
+    const runtime = {
+      callTool: vi.fn(),
+      resolveAppTarget: vi.fn(async () => ({
+        content: [{ type: "text", text: "resolved" }],
+        structuredContent: { status: "unresolved" },
+      })),
+    };
+    registerComputerUseTools(pi as never, runtime as unknown as ComputerUseRuntime);
+
+    const tool = getRegisteredTool(pi, "computer_use_resolve_app");
+    const result = await tool.execute("call-1", { app: "dudo" }, undefined, undefined, ctx);
+
+    expect(tool).toMatchObject({
+      approval: "read",
+      defaultInactive: true,
+    });
+    expect(tool.mcpServerName).toBeUndefined();
+    expect(tool.mcpToolName).toBeUndefined();
+    expect(runtime.resolveAppTarget).toHaveBeenCalledWith(ctx, "dudo");
+    expect(runtime.callTool).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: "resolved" }],
+      details: { hasStructuredContent: true },
+    });
   });
 
   it("forwards execute calls to the matching MCP tool and summarizes payload shape", async () => {
@@ -113,6 +166,10 @@ describe("registerComputerUseTools", () => {
     const getAppState = getRegisteredTool(pi, "computer_use_get_app_state").parameters;
     expect(getAppState.safeParse({}).success).toBe(false);
     expect(getAppState.safeParse({ app: "Finder" }).success).toBe(true);
+
+    const resolveApp = getRegisteredTool(pi, "computer_use_resolve_app").parameters;
+    expect(resolveApp.safeParse({}).success).toBe(false);
+    expect(resolveApp.safeParse({ app: "pid:29156" }).success).toBe(true);
 
     const typeText = getRegisteredTool(pi, "computer_use_type_text").parameters;
     expect(typeText.safeParse({ app: "Finder" }).success).toBe(false);

@@ -83,12 +83,42 @@ describe("ComputerUseBackend", () => {
     expect(result.content).toEqual([{ type: "text", text: "(no content)" }]);
   });
 
-  it("throws when MCP result has isError", async () => {
+  it("enriches Invalid app from get_app_state with one list_apps diagnostic lookup", async () => {
+    const client = new FakeClient();
+    client.responses.push({ isError: true, content: [{ type: "text", text: "Invalid app" }] });
+    client.responses.push({
+      content: [
+        {
+          type: "text",
+          text: "Dudo CUA Test — /tmp/DudoCUATest.app/ — dev.dudo.cua-smoke [running]",
+        },
+      ],
+    });
+    const threads = new FakeThreads();
+    const backend = new ComputerUseBackend(client as never, threads as never);
+
+    const thrown = await backend.callTool("/tmp", "get_app_state", { app: "/repo/target/debug/dudo" }).catch((error) => error);
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toContain("Invalid app");
+    expect(message).toContain("Plugin diagnosis:");
+    expect(message).toContain("local development GUI apps launched as raw executables");
+    expect(message).toContain("bundle id or .app bundle path");
+    expect(client.calls.map((call) => call.params.tool)).toEqual(["get_app_state", "list_apps"]);
+    expect(client.calls[1]?.params).toMatchObject({ server: "computer-use", threadId: "thread-1", tool: "list_apps" });
+    expect(threads.resetCount).toBe(0);
+  });
+
+  it("does not perform Invalid app diagnostic lookups for write tools", async () => {
     const client = new FakeClient();
     client.responses.push({ isError: true, content: [{ type: "text", text: "Invalid app" }] });
     const backend = new ComputerUseBackend(client as never, new FakeThreads() as never);
 
-    await expect(backend.callTool("/tmp", "get_app_state", { app: "Nope" })).rejects.toThrow("Invalid app");
+    await expect(
+      backend.callTool("/tmp", "click", { app: "/repo/target/debug/dudo", x: 12, y: 34 }),
+    ).rejects.toThrow("Invalid app");
+    expect(client.calls.map((call) => call.params.tool)).toEqual(["click"]);
   });
 
   it("does not retry MCP isError content that mentions stale threads", async () => {

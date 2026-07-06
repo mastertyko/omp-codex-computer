@@ -40,7 +40,7 @@ Inside OMP:
 /codex-computer diagnose
 ```
 
-The extension registers `computer_use_*` tools for native macOS app inspection and interaction through Codex Computer Use.
+The extension registers `computer_use_*` tools for native macOS app inspection and interaction through Codex Computer Use, plus a local `computer_use_resolve_app` diagnostic tool that helps identify bad app targets before control actions.
 
 Use `omp-dev -e .` for a local smoke test without installing the package.
 
@@ -60,7 +60,7 @@ Set `OMP_CODEX_COMPUTER_STATUS=off` before starting OMP to default the footer st
 
 The extension does not automate the desktop directly. It calls Codex app-server, which owns the bundled plugin lifecycle and permission flow. Permission requests fail closed when OMP has no UI available.
 
-Desktop tasks should start with read-only discovery such as `computer_use_list_apps` or `computer_use_get_app_state`. Mutating tools are registered with write approval, and the bundled `codex-computer` skill tells the model to verify after clicks, typing, scrolling, dragging, and value changes.
+Desktop tasks should start with read-only discovery such as `computer_use_list_apps`, `computer_use_resolve_app`, or `computer_use_get_app_state`. If `get_app_state` returns `Invalid app`, the adapter enriches the error with target-resolution guidance for cases like unbundled local GUI processes launched as raw executables. Mutating tools are registered with write approval, and the bundled `codex-computer` skill tells the model to verify after clicks, typing, scrolling, dragging, and value changes.
 
 ## Contributing and security
 
