@@ -119,6 +119,7 @@ jobs:
           fi
 
           export LATEST_VERSION="${latest_tag#v}"
+          echo "previous_tag=$latest_tag" >> "$GITHUB_OUTPUT"
           node <<'NODE' >> "$GITHUB_OUTPUT"
           const pkg = require("./package.json");
           const latest = process.env.LATEST_VERSION || "";
@@ -229,6 +230,17 @@ jobs:
 
       - name: Create GitHub release notes
         if: steps.target.outputs.skip != 'true' && steps.version.outputs.skip != 'true'
-        run: gh release create "${{ steps.version.outputs.tag }}" --target "${{ steps.release_commit.outputs.release_sha }}" --title "${{ steps.version.outputs.tag }}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+          RELEASE_SHA: ${{ steps.release_commit.outputs.release_sha }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          notes_args=()
+          if [ -n "$PREVIOUS_TAG" ]; then
+            notes_args=(--notes-start-tag "$PREVIOUS_TAG")
+          fi
+
+          gh release create "$RELEASE_TAG" --target "$RELEASE_SHA" --title "$RELEASE_TAG" --generate-notes "${notes_args[@]}"
