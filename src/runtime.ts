@@ -8,7 +8,7 @@ import { CodexThreadManager } from "./thread-manager";
 
 const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
 const COMPUTER_STATUS_KEY = "codex-computer";
-const COMPUTER_STATUS_LABEL = "Codex 💻";
+const COMPUTER_STATUS_LABEL = "💻 codex";
 const STATUS_DISABLED_VALUES: Record<string, true> = {
   "0": true,
   false: true,

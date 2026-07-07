@@ -291,7 +291,7 @@ describe("ComputerUseRuntime lifecycle", () => {
 
     expect(client.stop).toHaveBeenCalledTimes(1);
     expect(running).toBe(false);
-    expect(setStatus).toHaveBeenCalledWith("codex-computer", "Codex 💻: idle");
+    expect(setStatus).toHaveBeenCalledWith("codex-computer", "💻 codex: idle");
   });
   it("clears the footer when hidden, suppresses hidden updates, and restores the latest status when shown", async () => {
     const setStatus = vi.fn();
@@ -317,8 +317,8 @@ describe("ComputerUseRuntime lifecycle", () => {
     runtime.setContext(createContext("/tmp/project", async () => true, setStatus));
     await runtime.callTool(createContext("/tmp/project", async () => true, setStatus), "inspect", { app: "Safari" });
 
-    expect(setStatus).toHaveBeenNthCalledWith(1, "codex-computer", "Codex 💻: working: Safari");
-    expect(setStatus).toHaveBeenNthCalledWith(2, "codex-computer", "Codex 💻: ready");
+    expect(setStatus).toHaveBeenNthCalledWith(1, "codex-computer", "💻 codex: working: Safari");
+    expect(setStatus).toHaveBeenNthCalledWith(2, "codex-computer", "💻 codex: ready");
 
     runtime.setStatusVisible(false);
 
@@ -332,7 +332,7 @@ describe("ComputerUseRuntime lifecycle", () => {
 
     runtime.setStatusVisible(true);
 
-    expect(setStatus).toHaveBeenNthCalledWith(5, "codex-computer", "Codex 💻: permission");
+    expect(setStatus).toHaveBeenNthCalledWith(5, "codex-computer", "💻 codex: permission");
   });
 
   it("stops the client after the idle timeout elapses following a successful tool call", async () => {
@@ -374,7 +374,7 @@ describe("ComputerUseRuntime lifecycle", () => {
 
       expect(client.stop).toHaveBeenCalledTimes(1);
       expect(running).toBe(false);
-      expect(setStatus).toHaveBeenCalledWith("codex-computer", "Codex 💻: idle");
+      expect(setStatus).toHaveBeenCalledWith("codex-computer", "💻 codex: idle");
     } finally {
       vi.useRealTimers();
     }
