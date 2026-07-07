@@ -61,7 +61,7 @@ Use `omp plugin list` to confirm the plugin is no longer installed.
 - `/codex-computer enable` — enables the `computer_use_*` tools.
 - `/codex-computer disable` — disables the `computer_use_*` tools and shuts down the runtime.
 - `/codex-computer restart`
-- `/codex-computer hide-status` — hides the `Codex 💻: …` footer status for the current extension instance.
+- `/codex-computer hide-status` — hides the `💻 codex: …` footer status for the current extension instance.
 - `/codex-computer show-status` — shows the footer status again.
 
 Set `OMP_CODEX_COMPUTER_STATUS=off` before starting OMP to default the footer status to hidden.
