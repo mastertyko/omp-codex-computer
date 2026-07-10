@@ -97,6 +97,15 @@ describe("AppServerClient", () => {
     await expect(second).resolves.toBe("two");
   });
 
+  it("writes notifications without request ids", async () => {
+    const client = new AppServerClient();
+    const { writes } = attachFakeProcess(client);
+
+    await client.notify("initialized");
+
+    expect(writes).toEqual([`${JSON.stringify({ method: "initialized" })}\n`]);
+  });
+
   it("rejects JSON-RPC errors", async () => {
     const client = new AppServerClient();
     attachFakeProcess(client);
@@ -266,5 +275,13 @@ describe("AppServerClient", () => {
 
     expect(() => deliver(client, { id: 1, result: "late" })).not.toThrow();
     expect(pendingCount(client)).toBe(0);
+  });
+
+  it("rejects notification write errors and clears the failed process", async () => {
+    const client = new AppServerClient();
+    attachFakeProcess(client, { writeError: new Error("write failed") });
+
+    await expect(client.notify("initialized")).rejects.toThrow("write failed");
+    expect(client.isRunning()).toBe(false);
   });
 });

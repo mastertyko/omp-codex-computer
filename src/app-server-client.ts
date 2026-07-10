@@ -177,6 +177,28 @@ export class AppServerClient {
       });
     });
   }
+  async notify(method: string, params?: unknown): Promise<void> {
+    const child = this.process;
+    if (!child) throw new Error("Codex app-server process is not running");
+
+    const message: AppServerNotification = params === undefined ? { method } : { method, params };
+    const payload = `${JSON.stringify(message)}\n`;
+
+    await new Promise<void>((resolve, reject) => {
+      child.stdin.write(payload, (error) => {
+        if (error) {
+          this.cleanupCurrentChild(child, error);
+          reject(error);
+          return;
+        }
+        if (this.process !== child) {
+          reject(new Error("Codex app-server process changed while sending notification"));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
 
   private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
     if (this.process !== child) return;
