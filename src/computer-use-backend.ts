@@ -196,7 +196,7 @@ async function resetStoppedComputerUseSession(): Promise<void> {
   try {
     await execFileAsync("killall", ["SkyComputerUseService"], { timeout: 2_000 });
   } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
     if (code !== 1) throw error;
   }
 

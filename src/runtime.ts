@@ -90,6 +90,10 @@ export class ComputerUseRuntime {
         clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: true },
       })
+      .then(async (response) => {
+        await this.client.notify("initialized");
+        return response;
+      })
       .catch((error: unknown) => {
         if (this.initializePromise === initializePromise) this.initializePromise = undefined;
         throw error;

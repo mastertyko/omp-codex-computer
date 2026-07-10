@@ -214,7 +214,7 @@ function createParameterSchemas(pi: ExtensionAPI): Record<ComputerUseToolName, u
       element_index: elementIndex.optional(),
       x: z.number().describe("The x coordinate to click.").optional(),
       y: z.number().describe("The y coordinate to click.").optional(),
-      click_count: z.number().describe("The number of clicks to perform.").optional(),
+      click_count: z.number().int().describe("The number of clicks to perform.").optional(),
       mouse_button: z.enum(["left", "right", "middle"]).describe("The mouse button to click.").optional(),
     }).passthrough(),
     computer_use_type_text: z.object({

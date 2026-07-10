@@ -175,15 +175,20 @@ describe("ComputerUseRuntime lifecycle", () => {
     }
   });
 
-  it("retries initialize after a rejected request while the client is still running", async () => {
+  it("retries initialize after a rejected request and notifies only after success", async () => {
     const runtime = new ComputerUseRuntime();
     const requests: Array<{ method: string; params: unknown }> = [];
+    const events: string[] = [];
     const client = {
       isRunning: () => true,
       request: vi.fn(async (method: string, params: unknown) => {
         requests.push({ method, params });
+        events.push(method);
         if (requests.length === 1) throw new Error("initialize failed");
         return { userAgent: "test", codexHome: "/tmp/codex", platformFamily: "test", platformOs: "test" };
+      }),
+      notify: vi.fn(async (method: string) => {
+        events.push(method);
       }),
       stop: async () => undefined,
       onServerRequest: () => undefined,
@@ -193,7 +198,7 @@ describe("ComputerUseRuntime lifecycle", () => {
     await expect(runtime.initialize()).rejects.toThrow("initialize failed");
     await expect(runtime.initialize()).resolves.toMatchObject({ userAgent: "test" });
 
-    expect(requests.map((request) => request.method)).toEqual(["initialize", "initialize"]);
+    expect(events).toEqual(["initialize", "initialize", "initialized"]);
   });
 
   it("keeps the active callTool context while a later call waits", async () => {
@@ -215,6 +220,7 @@ describe("ComputerUseRuntime lifecycle", () => {
         platformFamily: "test",
         platformOs: "test",
       })),
+      notify: vi.fn(async () => undefined),
       stop: async () => undefined,
       onServerRequest: () => undefined,
     };
@@ -269,6 +275,7 @@ describe("ComputerUseRuntime lifecycle", () => {
         platformFamily: "test",
         platformOs: "test",
       })),
+      notify: vi.fn(async () => undefined),
       stop: vi.fn(async () => {
         running = false;
       }),
@@ -307,6 +314,7 @@ describe("ComputerUseRuntime lifecycle", () => {
         platformFamily: "test",
         platformOs: "test",
       })),
+      notify: vi.fn(async () => undefined),
       stop: async () => undefined,
       onServerRequest: () => undefined,
     };
@@ -353,6 +361,7 @@ describe("ComputerUseRuntime lifecycle", () => {
           platformFamily: "test",
           platformOs: "test",
         })),
+        notify: vi.fn(async () => undefined),
         stop: vi.fn(async () => {
           running = false;
         }),

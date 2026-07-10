@@ -8,7 +8,7 @@ Thanks for improving `omp-codex-computer`. This repository is intentionally smal
 - Bun 1.3 or newer
 - Node.js 22 or newer
 - Codex CLI on `PATH` as `codex`
-- Codex.app with the bundled `computer-use` plugin available
+- ChatGPT desktop app with Codex Computer Use enabled/available
 - OMP installed
 
 ## Local workflow

@@ -179,5 +179,7 @@ describe("registerComputerUseTools", () => {
     expect(click.safeParse({ element_index: "1" }).success).toBe(false);
     expect(click.safeParse({ app: "Finder", element_index: "1" }).success).toBe(true);
     expect(click.safeParse({ app: "Finder", x: 12, y: 34 }).success).toBe(true);
+    expect(click.safeParse({ app: "Finder", click_count: 2 }).success).toBe(true);
+    expect(click.safeParse({ app: "Finder", click_count: 1.5 }).success).toBe(false);
   });
 });
