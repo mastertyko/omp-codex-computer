@@ -1,15 +1,22 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { convertCodexContentToOmpContent, type OmpContentBlock } from "./content";
 import { logDebug } from "./log";
 import { SerialQueue } from "./queue";
-import { formatAppTargetResolution, formatInvalidAppDiagnostic, resolveAppTargetFromList } from "./app-target-resolver";
-import type { AppServerClient } from "./app-server-client";
+import {
+  formatAppTargetResolution,
+  formatInvalidAppDiagnostic,
+  resolveAppTargetFromList,
+  resolveAppTargetFromStructuredList,
+} from "./app-target-resolver";
+import { AppServerRequestError, type AppServerClient } from "./app-server-client";
 import type { CodexThreadManager } from "./thread-manager";
+import {
+  ComputerUseTransport,
+  SkyComputerUseError,
+  type RawComputerUseToolCallResponse,
+} from "./computer-use-transport";
 
 export interface ComputerUseBackendOptions {
   mcpServerName?: string;
-  resetStoppedSession?: () => Promise<void>;
 }
 
 export interface ComputerUseToolResult {
@@ -18,14 +25,6 @@ export interface ComputerUseToolResult {
   meta?: unknown;
 }
 
-interface RawMcpToolCallResponse {
-  content: unknown;
-  structuredContent?: unknown;
-  _meta?: unknown;
-  isError?: boolean | null;
-}
-
-const execFileAsync = promisify(execFile);
 function textContentFromRawContent(content: unknown): string {
   return convertCodexContentToOmpContent(content)
     .filter((block) => block.type === "text")
@@ -51,16 +50,21 @@ class ComputerUseSessionStoppedError extends Error {
 
 export class ComputerUseBackend {
   private readonly queue = new SerialQueue();
-  private readonly mcpServerName: string;
-  private readonly resetStoppedSession: () => Promise<void>;
+  private readonly transport: ComputerUseTransport;
 
   constructor(
-    private readonly client: Pick<AppServerClient, "request">,
+    client: Pick<AppServerClient, "request">,
     private readonly threads: Pick<CodexThreadManager, "getThreadId" | "reset">,
     options: ComputerUseBackendOptions = {},
   ) {
-    this.mcpServerName = options.mcpServerName ?? "computer-use";
-    this.resetStoppedSession = options.resetStoppedSession ?? resetStoppedComputerUseSession;
+    this.transport = new ComputerUseTransport(client, threads, {
+      directMcpServerName: options.mcpServerName,
+    });
+  }
+
+  reset(): void {
+    this.threads.reset();
+    this.transport.reset();
   }
 
   async callTool(
@@ -71,7 +75,7 @@ export class ComputerUseBackend {
   ): Promise<ComputerUseToolResult> {
     return this.queue.enqueue(async () => {
       throwIfAborted(signal, `Aborted Computer Use tool call ${tool}`);
-      logDebug("computer-use.tool.start", { tool, argKeys: Object.keys(args) });
+      logDebug("computer-use.tool.start", { tool });
       return await this.callToolWithRetry(cwd, tool, args, signal);
     });
   }
@@ -79,15 +83,16 @@ export class ComputerUseBackend {
   async resolveAppTarget(cwd: string, app: string, signal?: AbortSignal): Promise<ComputerUseToolResult> {
     return this.queue.enqueue(async () => {
       throwIfAborted(signal, `Aborted Computer Use app target resolution for ${app}`);
-      logDebug("computer-use.resolve-app.start", { app });
+      logDebug("computer-use.resolve-app.start", { tool: "list_apps" });
       const listApps = await this.callToolWithRetry(cwd, "list_apps", {}, signal);
       const listAppsText = listApps.content
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("\n");
-      const resolution = resolveAppTargetFromList(app, listAppsText);
+      const resolution = resolveAppTargetFromStructuredList(app, listApps.structuredContent)
+        ?? resolveAppTargetFromList(app, listAppsText);
       const text = formatAppTargetResolution(resolution);
-      logDebug("computer-use.resolve-app.end", { app, status: resolution.status });
+      logDebug("computer-use.resolve-app.end", { tool: "list_apps" });
 
       return {
         content: [{ type: "text", text }],
@@ -102,23 +107,30 @@ export class ComputerUseBackend {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ComputerUseToolResult> {
-    const threadId = await this.threads.getThreadId(cwd);
-    throwIfAborted(signal, `Aborted Computer Use tool call ${tool}`);
-    const response = await this.client.request<RawMcpToolCallResponse>("mcpServer/tool/call", {
-      server: this.mcpServerName,
-      threadId,
-      tool,
-      arguments: args,
-    }, undefined, signal);
+    let response: RawComputerUseToolCallResponse;
+    try {
+      response = await this.transport.callTool(cwd, tool, args, signal);
+    } catch (error) {
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      if (getNumericErrorCode(error) === -10012
+        || originalMessage.includes(STOPPED_APPLICATION_SESSION_TEXT)) throw error;
+      if (tool === "get_app_state" && isInvalidAppError(error) && typeof args.app === "string") {
+        const enrichedMessage = await this.enrichInvalidAppError(cwd, args.app, originalMessage, signal);
+        if (error instanceof SkyComputerUseError) throw error.withMessage(enrichedMessage);
+        if (error instanceof AppServerRequestError) throw error.withMessage(enrichedMessage);
+        throw new McpToolCallError(enrichedMessage);
+      }
+      throw error;
+    }
 
     if (response.isError) {
-      logDebug("computer-use.tool.error", { tool });
+      logDebug("computer-use.tool.error", { route: response.route, tool });
       const text = textContentFromRawContent(response.content);
       if (text.includes(STOPPED_APPLICATION_SESSION_TEXT)) throw new ComputerUseSessionStoppedError(text);
       if (tool === "get_app_state" && /\binvalid app\b/i.test(text) && typeof args.app === "string") {
         throw new McpToolCallError(await this.enrichInvalidAppError(cwd, args.app, text, signal));
       }
-      throw new McpToolCallError(text || `${this.mcpServerName}.${tool} failed`);
+      throw new McpToolCallError(text || `${tool} failed through the ${response.route} transport`);
     }
 
     const content = convertCodexContentToOmpContent(response.content);
@@ -128,7 +140,11 @@ export class ComputerUseBackend {
       .find((text) => text.includes(STOPPED_APPLICATION_SESSION_TEXT));
     if (stoppedSessionText) throw new ComputerUseSessionStoppedError(stoppedSessionText);
 
-    logDebug("computer-use.tool.end", { tool, contentTypes: content.map((block) => block.type).join(",") });
+    logDebug("computer-use.tool.end", {
+      route: response.route,
+      tool,
+      blockTypes: content.map((block) => block.type).join(","),
+    });
 
     return {
       content,
@@ -142,25 +158,35 @@ export class ComputerUseBackend {
     tool: string,
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    mayRetryStaleThread = true,
   ): Promise<ComputerUseToolResult> {
     try {
       return await this.callToolOnce(cwd, tool, args, signal);
     } catch (error) {
-      if (error instanceof McpToolCallError) throw error;
-
-      if (error instanceof ComputerUseSessionStoppedError) {
-        logDebug("computer-use.tool.retry-stopped-session", { tool });
-        this.threads.reset();
-        await this.resetStoppedSession();
-        return this.callToolOnce(cwd, tool, args, signal);
+      const message = error instanceof Error ? error.message : String(error);
+      const stoppedSession = error instanceof ComputerUseSessionStoppedError
+        || getNumericErrorCode(error) === -10012
+        || message.includes(STOPPED_APPLICATION_SESSION_TEXT);
+      if (stoppedSession) {
+        logDebug("computer-use.tool.reset-stopped-session", {
+          tool,
+          errorCode: getNumericErrorCode(error),
+        });
+        this.reset();
+        throw error;
       }
 
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/thread not found|invalid thread id/i.test(message)) throw error;
+      if (error instanceof McpToolCallError) throw error;
+      const staleThread = /thread not found|invalid thread id/i.test(message);
+      const preDispatch = !(error instanceof SkyComputerUseError) || error.phase === "bootstrap";
+      if (!mayRetryStaleThread || !staleThread || !preDispatch) throw error;
 
-      logDebug("computer-use.tool.retry-thread", { tool });
-      this.threads.reset();
-      return this.callToolOnce(cwd, tool, args, signal);
+      logDebug("computer-use.tool.reset-thread", {
+        tool,
+        errorCode: getNumericErrorCode(error),
+      });
+      this.reset();
+      return this.callToolWithRetry(cwd, tool, args, signal, false);
     }
   }
 
@@ -176,12 +202,26 @@ export class ComputerUseBackend {
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("\n");
-      return formatInvalidAppDiagnostic(originalMessage, app, listAppsText);
+      return formatInvalidAppDiagnostic(originalMessage, app, listAppsText, undefined, listApps.structuredContent);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof ComputerUseSessionStoppedError
+        || getNumericErrorCode(error) === -10012
+        || message.includes(STOPPED_APPLICATION_SESSION_TEXT)) throw error;
       return formatInvalidAppDiagnostic(originalMessage, app, "", message);
     }
   }
+}
+
+function isInvalidAppError(error: unknown): boolean {
+  return getNumericErrorCode(error) === -10010
+    || (error instanceof Error && /\binvalid app\b/i.test(error.message));
+}
+
+function getNumericErrorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const code = Reflect.get(error, "code");
+  return typeof code === "number" && Number.isFinite(code) ? code : undefined;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, message: string): void {
@@ -192,13 +232,3 @@ function throwIfAborted(signal: AbortSignal | undefined, message: string): void 
   throw error;
 }
 
-async function resetStoppedComputerUseSession(): Promise<void> {
-  try {
-    await execFileAsync("killall", ["SkyComputerUseService"], { timeout: 2_000 });
-  } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-    if (code !== 1) throw error;
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
-}

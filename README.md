@@ -6,10 +6,10 @@ Local OMP extension that exposes OpenAI Codex Computer Use through `codex app-se
 
 - macOS
 - Codex CLI on `PATH` as `codex`
-- ChatGPT desktop app with Codex Computer Use enabled/available
+- Codex.app or ChatGPT.app build with Codex Computer Use enabled/available
 - OMP installed
 - Accessibility and Screen Recording permissions granted when Codex Computer Use asks
-- `computer-use` MCP server exposed by `codex app-server`
+- Bundled `computer-use` Codex plugin available through app-server; this extension cannot operate without it
 
 ## Installation
 
@@ -56,8 +56,8 @@ Use `omp plugin list` to confirm the plugin is no longer installed.
 
 ## Commands
 
-- `/codex-computer status` — checks the Codex CLI, app-server, required MCP tools, and reports additional upstream MCP tools not exposed by this adapter.
-- `/codex-computer diagnose` — prints the same detailed readiness/update report.
+- `/codex-computer status` — checks Codex CLI/app-server, the bundled `computer-use` plugin, the current Sky/`node_repl` route, and the legacy direct-MCP fallback.
+- `/codex-computer diagnose` — prints the same detailed readiness and route report.
 - `/codex-computer enable` — enables the `computer_use_*` tools.
 - `/codex-computer disable` — disables the `computer_use_*` tools and shuts down the runtime.
 - `/codex-computer restart`
@@ -66,11 +66,20 @@ Use `omp plugin list` to confirm the plugin is no longer installed.
 
 Set `OMP_CODEX_COMPUTER_STATUS=off` before starting OMP to default the footer status to hidden.
 
+## Compatibility routes
+
+The adapter negotiates the transport from capabilities reported by Codex app-server:
+
+- Current Codex: `app-server → node_repl/js → computer-use-client.mjs → Sky`.
+- Legacy Codex: direct `computer-use` MCP, only when that server advertises all required tools.
+
+Sky is preferred when both routes are available. Fallback is allowed only when Sky bootstrap fails before an action is dispatched; the adapter never falls back after dispatch because that could repeat a click or typed text. Public OMP tool names and approval levels remain unchanged.
+
 ## Safety
 
-The extension does not automate the desktop directly. It calls Codex app-server, which owns the Computer Use server lifecycle and permission flow. Permission requests fail closed when OMP has no UI available.
+The extension does not automate the desktop directly. It calls Codex app-server, which owns the bundled plugin lifecycle, `node_repl` runtime, and permission flow. Permission requests fail closed when OMP has no UI available.
 
-Desktop tasks should start with read-only discovery such as `computer_use_list_apps`, `computer_use_resolve_app`, or `computer_use_get_app_state`. If `get_app_state` returns `Invalid app`, the adapter enriches the error with target-resolution guidance for cases like unbundled local GUI processes launched as raw executables. Mutating tools are registered with write approval, and the bundled `codex-computer` skill tells the model to verify after clicks, typing, scrolling, dragging, and value changes.
+Desktop tasks should start with read-only discovery such as `computer_use_list_apps`, `computer_use_resolve_app`, or `computer_use_get_app_state`. If `get_app_state` returns `Invalid app`, the adapter enriches the error with target-resolution guidance for cases like unbundled local GUI processes launched as raw executables. Mutating tools are registered with write approval, are never automatically replayed after a user-stopped Computer Use session, and the bundled `codex-computer` skill tells the model to verify after clicks, typing, scrolling, dragging, and value changes.
 
 ## Contributing and security
 
@@ -92,8 +101,10 @@ omp-dev -e .
 /codex-computer diagnose
 ```
 
-Verified on 2026-07-10 with OMP v16.3.14 and Codex CLI 0.144.1:
+Verified on 2026-07-27 with OMP v17.1.4, Codex CLI 0.145.0, and bundled Computer Use plugin 1.0.1000502:
 
-- `bun run check` passed with 95 tests.
-- The thread-scoped readiness check reported all 10 required Computer Use MCP tools.
-- A direct adapter smoke listed available apps and read the ChatGPT app state.
+- `bun run check` passed with 145 tests.
+- `npm pack --dry-run` completed successfully.
+- `/codex-computer diagnose` reported `ready` through the Sky/`node_repl` route hosted by ChatGPT.app.
+- The public OMP `computer_use_list_apps` model path returned 29 apps without exposing app details in the verification output.
+- A controlled read-only `get_app_state` smoke returned accessibility text and one in-memory `image/png` block.

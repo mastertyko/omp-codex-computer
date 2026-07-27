@@ -9,6 +9,21 @@ export interface AppServerClientOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export class AppServerRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: number,
+    readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = "AppServerRequestError";
+  }
+
+  withMessage(message: string): AppServerRequestError {
+    return new AppServerRequestError(message, this.code, this.data);
+  }
+}
+
 export interface ServerRequestResponder {
   accept(result: unknown): void;
   reject(error: { code: number; message: string; data?: unknown }): void;
@@ -22,12 +37,13 @@ export type ServerRequestHandler = (
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
 }
 
 export class AppServerClient {
   private process: ChildProcessWithoutNullStreams | undefined;
   private stdout: ReadlineInterface | undefined;
+  private generation = 0;
   private nextId = 1;
   private readonly pending = new Map<RequestId, PendingRequest>();
   private serverRequestHandler: ServerRequestHandler | undefined;
@@ -44,6 +60,7 @@ export class AppServerClient {
       env: { ...process.env, ...this.options.env },
     });
 
+    this.generation += 1;
     this.process = child;
     this.stdout = createInterface({ input: child.stdout });
     this.stdout.on("line", (line) => this.handleLine(child, line));
@@ -123,10 +140,43 @@ export class AppServerClient {
   ): Promise<TResult> {
     this.start();
 
-    if (signal?.aborted) throw createAbortError(`Aborted Codex app-server request to ${method}`);
-
     const child = this.process;
     if (!child) throw new Error("Codex app-server process is not running");
+
+    return this.requestFromChild<TResult>(child, this.generation, method, params, timeoutMs, signal);
+  }
+
+  async requestWithNotification<TResult = unknown>(
+    method: string,
+    params: unknown,
+    notificationMethod: string,
+    notificationParams?: unknown,
+    timeoutMs = this.options.requestTimeoutMs ?? 30_000,
+    signal?: AbortSignal,
+  ): Promise<TResult> {
+    this.start();
+
+    const child = this.process;
+    if (!child || child.exitCode !== null) throw new Error("Codex app-server process is not running");
+    const generation = this.generation;
+
+    const result = await this.requestFromChild<TResult>(child, generation, method, params, timeoutMs, signal);
+    this.assertCurrentChild(child, generation, `notification ${notificationMethod}`);
+    await this.writeNotification(child, generation, notificationMethod, notificationParams, signal);
+    this.assertCurrentChild(child, generation, `notification ${notificationMethod}`);
+    return result;
+  }
+
+  private requestFromChild<TResult>(
+    child: ChildProcessWithoutNullStreams,
+    generation: number,
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<TResult> {
+    if (signal?.aborted) throw createAbortError(`Aborted Codex app-server request to ${method}`);
+    this.assertCurrentChild(child, generation, `request to ${method}`);
 
     const id = this.nextId++;
     const message: AppServerRequest = params === undefined ? { id, method } : { id, method, params };
@@ -134,7 +184,7 @@ export class AppServerClient {
 
     return new Promise<TResult>((resolve, reject) => {
       let settled = false;
-      let timer: NodeJS.Timeout;
+      let timer: NodeJS.Timeout | undefined;
       let onAbort: (() => void) | undefined;
       const cleanup = () => {
         clearTimeout(timer);
@@ -154,9 +204,11 @@ export class AppServerClient {
         reject(error);
       };
 
-      timer = setTimeout(() => {
-        rejectOnce(new Error(`Timed out waiting for Codex app-server response to ${method}`));
-      }, timeoutMs);
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          rejectOnce(new Error(`Timed out waiting for Codex app-server response to ${method}`));
+        }, timeoutMs);
+      }
       onAbort = () => rejectOnce(createAbortError(`Aborted Codex app-server request to ${method}`));
       signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -177,27 +229,84 @@ export class AppServerClient {
       });
     });
   }
-  async notify(method: string, params?: unknown): Promise<void> {
+
+  async notify(method: string, params?: unknown, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw createAbortError(`Aborted Codex app-server notification ${method}`);
+
     const child = this.process;
-    if (!child) throw new Error("Codex app-server process is not running");
+    if (!child || child.exitCode !== null) throw new Error("Codex app-server process is not running");
+
+    return this.writeNotification(child, this.generation, method, params, signal);
+  }
+
+  private writeNotification(
+    child: ChildProcessWithoutNullStreams,
+    generation: number,
+    method: string,
+    params?: unknown,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) throw createAbortError(`Aborted Codex app-server notification ${method}`);
+    this.assertCurrentChild(child, generation, `notification ${method}`);
 
     const message: AppServerNotification = params === undefined ? { method } : { method, params };
     const payload = `${JSON.stringify(message)}\n`;
 
-    await new Promise<void>((resolve, reject) => {
-      child.stdin.write(payload, (error) => {
-        if (error) {
-          this.cleanupCurrentChild(child, error);
-          reject(error);
-          return;
-        }
-        if (this.process !== child) {
-          reject(new Error("Codex app-server process changed while sending notification"));
-          return;
-        }
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let onAbort: (() => void) | undefined;
+      const cleanup = () => {
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+      };
+      const resolveOnce = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve();
-      });
+      };
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      onAbort = () => rejectOnce(createAbortError(`Aborted Codex app-server notification ${method}`));
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+
+      try {
+        child.stdin.write(payload, (error) => {
+          if (error) {
+            rejectOnce(error);
+            return;
+          }
+
+          try {
+            this.assertCurrentChild(child, generation, `notification ${method}`);
+          } catch (currentChildError) {
+            rejectOnce(currentChildError instanceof Error ? currentChildError : new Error(String(currentChildError)));
+            return;
+          }
+          resolveOnce();
+        });
+      } catch (error) {
+        rejectOnce(error instanceof Error ? error : new Error(String(error)));
+      }
     });
+  }
+
+  private assertCurrentChild(
+    child: ChildProcessWithoutNullStreams,
+    generation: number,
+    operation: string,
+  ): void {
+    if (this.process === child && this.generation === generation && child.exitCode === null) return;
+    throw new Error(`Codex app-server process changed during ${operation}`);
   }
 
   private handleLine(child: ChildProcessWithoutNullStreams, line: string): void {
@@ -240,7 +349,7 @@ export class AppServerClient {
     clearTimeout(pending.timer);
 
     if (response.error) {
-      pending.reject(new Error(response.error.message));
+      pending.reject(new AppServerRequestError(response.error.message, response.error.code, response.error.data));
       return;
     }
 

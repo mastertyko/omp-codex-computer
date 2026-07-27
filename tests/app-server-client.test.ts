@@ -1,7 +1,8 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AppServerClient, type ServerRequestResponder } from "../src/app-server-client";
+import { AppServerClient, AppServerRequestError, type ServerRequestResponder } from "../src/app-server-client";
 
 const spawnMockState = vi.hoisted(() => ({
   child: undefined as unknown,
@@ -97,23 +98,23 @@ describe("AppServerClient", () => {
     await expect(second).resolves.toBe("two");
   });
 
-  it("writes notifications without request ids", async () => {
-    const client = new AppServerClient();
-    const { writes } = attachFakeProcess(client);
-
-    await client.notify("initialized");
-
-    expect(writes).toEqual([`${JSON.stringify({ method: "initialized" })}\n`]);
-  });
-
-  it("rejects JSON-RPC errors", async () => {
+  it("preserves JSON-RPC error metadata", async () => {
     const client = new AppServerClient();
     attachFakeProcess(client);
+    const data = { reason: "permission denied", retryable: false };
 
     const request = client.request("boom", {}, 1000);
-    deliver(client, { id: 1, error: { code: -1, message: "failed" } });
+    deliver(client, { id: 1, error: { code: -32_001, message: "failed", data } });
 
-    await expect(request).rejects.toThrow("failed");
+    const error = await request.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AppServerRequestError);
+    expect(error).toMatchObject({ message: "failed", code: -32_001, data });
+    if (!(error instanceof AppServerRequestError)) throw new Error("Expected an AppServerRequestError");
+
+    const rewritten = error.withMessage("initialize failed");
+    expect(rewritten).not.toBe(error);
+    expect(rewritten).toMatchObject({ message: "initialize failed", code: -32_001, data });
+    expect(rewritten.data).toBe(error.data);
   });
 
   it("times out unanswered requests", async () => {
@@ -121,6 +122,122 @@ describe("AppServerClient", () => {
     attachFakeProcess(client);
 
     await expect(client.request("slow", {}, 5)).rejects.toThrow("Timed out");
+  });
+
+  it("keeps timeoutMs=0 requests pending until a response arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new AppServerClient();
+      attachFakeProcess(client);
+
+      const request = client.request("no-deadline", {}, 0);
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(pendingCount(client)).toBe(1);
+      deliver(client, { id: 1, result: "completed" });
+      await expect(request).resolves.toBe("completed");
+      expect(pendingCount(client)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes a response-coupled notification to the same running child", async () => {
+    const client = new AppServerClient();
+    const { writes } = startWithFakeProcess(client);
+    const params = { clientInfo: { name: "test", version: "1" } };
+
+    const handshake = client.requestWithNotification<{ ready: true }>(
+      "initialize",
+      params,
+      "initialized",
+      undefined,
+      1000,
+    );
+
+    expect(writes).toEqual([`${JSON.stringify({ id: 1, method: "initialize", params })}\n`]);
+    deliver(client, { id: 1, result: { ready: true } });
+
+    await expect(handshake).resolves.toEqual({ ready: true });
+    expect(writes).toEqual([
+      `${JSON.stringify({ id: 1, method: "initialize", params })}\n`,
+      `${JSON.stringify({ method: "initialized" })}\n`,
+    ]);
+  });
+
+  it("rejects without notifying a replacement child after the response", async () => {
+    const client = new AppServerClient();
+    const first = startWithFakeProcess(client);
+    const handshake = client.requestWithNotification(
+      "initialize",
+      { clientInfo: { name: "test", version: "1" } },
+      "initialized",
+      undefined,
+      1000,
+    );
+
+    deliver(client, { id: 1, result: { ready: true } });
+    first.child.exitCode = 1;
+    first.child.emit("exit", 1, null);
+
+    const second = createFakeProcess();
+    spawnMockState.child = second.child;
+    client.start();
+
+    await expect(handshake).rejects.toThrow("process changed during notification initialized");
+    expect(first.writes).toHaveLength(1);
+    expect(second.writes).toEqual([]);
+  });
+
+  it("does not spawn a child when notifying a stopped client", async () => {
+    const client = new AppServerClient();
+    const spawnCallCount = vi.mocked(spawn).mock.calls.length;
+
+    await expect(client.notify("initialized")).rejects.toThrow("process is not running");
+
+    expect(vi.mocked(spawn).mock.calls).toHaveLength(spawnCallCount);
+    expect(client.isRunning()).toBe(false);
+  });
+
+  it("writes notifications without a JSON-RPC id", async () => {
+    const client = new AppServerClient();
+    const { writes } = attachFakeProcess(client);
+
+    await client.notify("initialized");
+
+    expect(writes).toEqual([`${JSON.stringify({ method: "initialized" })}\n`]);
+    expect(JSON.parse(writes[0] ?? "{}")).not.toHaveProperty("id");
+  });
+
+  it("rejects notifications when their stdin write fails", async () => {
+    const client = new AppServerClient();
+    const { writes } = attachFakeProcess(client, { writeError: new Error("write failed") });
+
+    await expect(client.notify("initialized")).rejects.toThrow("write failed");
+    expect(writes).toEqual([`${JSON.stringify({ method: "initialized" })}\n`]);
+  });
+
+  it("rejects an in-flight notification when aborted and ignores its late write callback", async () => {
+    const client = new AppServerClient();
+    const { child, writes } = attachFakeProcess(client);
+    let completeWrite: ((error?: Error | null) => void) | undefined;
+    child.stdin.write = (chunk, callback) => {
+      writes.push(chunk);
+      completeWrite = callback;
+      return true;
+    };
+    const controller = new AbortController();
+
+    const notification = client.notify("initialized", undefined, controller.signal);
+    const settled = vi.fn();
+    notification.then(settled, settled);
+    controller.abort();
+
+    await expect(notification).rejects.toMatchObject({ name: "AbortError" });
+    expect(settled).toHaveBeenCalledTimes(1);
+    completeWrite?.(null);
+    await Promise.resolve();
+    expect(settled).toHaveBeenCalledTimes(1);
   });
 
   it("ignores malformed JSON", () => {
@@ -275,13 +392,5 @@ describe("AppServerClient", () => {
 
     expect(() => deliver(client, { id: 1, result: "late" })).not.toThrow();
     expect(pendingCount(client)).toBe(0);
-  });
-
-  it("rejects notification write errors and clears the failed process", async () => {
-    const client = new AppServerClient();
-    attachFakeProcess(client, { writeError: new Error("write failed") });
-
-    await expect(client.notify("initialized")).rejects.toThrow("write failed");
-    expect(client.isRunning()).toBe(false);
   });
 });

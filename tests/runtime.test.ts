@@ -30,11 +30,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function permissionRequest(message: string): AppServerRequest {
+function permissionRequest(message: string, subtitle?: string): AppServerRequest {
   return {
     id: "permission",
     method: "mcpServer/elicitation/request",
-    params: { message, serverName: "computer-use" },
+    params: subtitle === undefined
+      ? { message, serverName: "computer-use" }
+      : { message, serverName: "computer-use", meta: { subtitle } },
   };
 }
 
@@ -66,12 +68,17 @@ describe("shouldDevAutoAccept", () => {
     }
   });
 
-  it("accepts only exact allowlisted app names from permission messages", () => {
+  it("accepts exact current and legacy prompts only for allowlisted apps", () => {
     process.env.OMP_CODEX_COMPUTER_DEV_AUTO_ACCEPT_APPS = "Calculator, TextEdit";
 
     expect(shouldDevAutoAccept("Allow Codex to use Calculator?")).toBe(true);
-    expect(shouldDevAutoAccept("Allow Codex to use Safari?")).toBe(false);
-    expect(shouldDevAutoAccept("Allow Codex to use Calculator Pro?")).toBe(false);
+    expect(shouldDevAutoAccept('Allow Computer Use to use "TextEdit"?')).toBe(true);
+    expect(shouldDevAutoAccept('Allow Computer Use to use "Safari"?')).toBe(false);
+    expect(shouldDevAutoAccept('Allow Computer Use to use "Calculator Pro"?')).toBe(false);
+    expect(shouldDevAutoAccept('Allow Computer Use to use "calculator"?')).toBe(false);
+    expect(shouldDevAutoAccept("Allow Computer Use to use Calculator?")).toBe(false);
+    expect(shouldDevAutoAccept('Please Allow Computer Use to use "Calculator"?')).toBe(false);
+    expect(shouldDevAutoAccept('Allow Computer Use to use "Calculator"? Continue')).toBe(false);
     expect(shouldDevAutoAccept("Codex requests access to Calculator")).toBe(false);
   });
 });
@@ -105,13 +112,33 @@ describe("ComputerUseRuntime server requests", () => {
     runtime.setContext(createContext("/tmp/project", confirm));
     const responder = new FakeResponder();
 
-    await runtime.handleServerRequestForTest(permissionRequest("Allow Codex to use TextEdit?"), responder);
+    await runtime.handleServerRequestForTest(
+      permissionRequest('Allow Computer Use to use "TextEdit"?', "Computer Use can view sensitive content."),
+      responder,
+    );
 
     expect(confirm).toHaveBeenCalledWith(
       "Codex permission",
-      "Allow Codex to use TextEdit?",
+      'Allow Computer Use to use "TextEdit"?\n\nComputer Use can view sensitive content.',
       undefined,
     );
+    expect(responder.accepted).toEqual([{ action: "accept", content: {} }]);
+    expect(responder.rejected).toEqual([]);
+  });
+
+  it("auto-accepts from the original message when a subtitle is present", async () => {
+    process.env.OMP_CODEX_COMPUTER_DEV_AUTO_ACCEPT_APPS = "TextEdit";
+    const confirm = vi.fn(async () => false);
+    const runtime = new ComputerUseRuntime();
+    runtime.setContext(createContext("/tmp/project", confirm));
+    const responder = new FakeResponder();
+
+    await runtime.handleServerRequestForTest(
+      permissionRequest('Allow Computer Use to use "TextEdit"?', "This warning is not part of the app name."),
+      responder,
+    );
+
+    expect(confirm).not.toHaveBeenCalled();
     expect(responder.accepted).toEqual([{ action: "accept", content: {} }]);
     expect(responder.rejected).toEqual([]);
   });
@@ -175,30 +202,131 @@ describe("ComputerUseRuntime lifecycle", () => {
     }
   });
 
-  it("retries initialize after a rejected request and notifies only after success", async () => {
+  it("performs the initialize handshake exactly once", async () => {
     const runtime = new ComputerUseRuntime();
-    const requests: Array<{ method: string; params: unknown }> = [];
-    const events: string[] = [];
+    const calls: string[] = [];
+    const response = {
+      userAgent: "test",
+      codexHome: "/tmp/codex",
+      platformFamily: "test",
+      platformOs: "test",
+    };
     const client = {
       isRunning: () => true,
-      request: vi.fn(async (method: string, params: unknown) => {
-        requests.push({ method, params });
-        events.push(method);
-        if (requests.length === 1) throw new Error("initialize failed");
-        return { userAgent: "test", codexHome: "/tmp/codex", platformFamily: "test", platformOs: "test" };
-      }),
-      notify: vi.fn(async (method: string) => {
-        events.push(method);
+      requestWithNotification: vi.fn(async (method: string, _params: unknown, notificationMethod: string) => {
+        calls.push(`${method}:${notificationMethod}`);
+        return response;
       }),
       stop: async () => undefined,
       onServerRequest: () => undefined,
     };
-    (runtime as unknown as { client: typeof client }).client = client;
+    const runtimeInternals = runtime as unknown as { client: typeof client };
+    runtimeInternals.client = client;
+
+    await Promise.all([runtime.initialize(), runtime.initialize()]);
+    await expect(runtime.initialize()).resolves.toBe(response);
+
+    expect(calls).toEqual(["initialize:initialized"]);
+    expect(client.requestWithNotification).toHaveBeenCalledTimes(1);
+    expect(client.requestWithNotification).toHaveBeenCalledWith(
+      "initialize",
+      {
+        clientInfo: { name: "omp-codex-computer", version: "0.1.1" },
+        capabilities: { experimentalApi: true },
+      },
+      "initialized",
+    );
+  });
+
+  it("retries a failed initialize handshake while the client is running", async () => {
+    const runtime = new ComputerUseRuntime();
+    const requests: Array<{ method: string; params: unknown; notificationMethod: string }> = [];
+    const client = {
+      isRunning: () => true,
+      requestWithNotification: vi.fn(
+        async (method: string, params: unknown, notificationMethod: string) => {
+          requests.push({ method, params, notificationMethod });
+          if (requests.length === 1) throw new Error("initialize failed");
+          return { userAgent: "test", codexHome: "/tmp/codex", platformFamily: "test", platformOs: "test" };
+        },
+      ),
+      stop: async () => undefined,
+      onServerRequest: () => undefined,
+    };
+    const runtimeInternals = runtime as unknown as { client: typeof client };
+    runtimeInternals.client = client;
 
     await expect(runtime.initialize()).rejects.toThrow("initialize failed");
     await expect(runtime.initialize()).resolves.toMatchObject({ userAgent: "test" });
 
-    expect(events).toEqual(["initialize", "initialize", "initialized"]);
+    expect(requests.map(({ method, notificationMethod }) => `${method}:${notificationMethod}`)).toEqual([
+      "initialize:initialized",
+      "initialize:initialized",
+    ]);
+  });
+
+  it("retries the full initialize handshake after a same-child rejection", async () => {
+    const runtime = new ComputerUseRuntime();
+    const calls: string[] = [];
+    const response = {
+      userAgent: "test",
+      codexHome: "/tmp/codex",
+      platformFamily: "test",
+      platformOs: "test",
+    };
+    const client = {
+      isRunning: () => true,
+      requestWithNotification: vi.fn(async (method: string, _params: unknown, notificationMethod: string) => {
+        calls.push(`${method}:${notificationMethod}`);
+        if (calls.length === 1) throw new Error("Codex app-server process changed during notification initialized");
+        return response;
+      }),
+      stop: async () => undefined,
+      onServerRequest: () => undefined,
+    };
+    const runtimeInternals = runtime as unknown as { client: typeof client };
+    runtimeInternals.client = client;
+
+    await expect(runtime.initialize()).rejects.toThrow("process changed during notification initialized");
+    await expect(runtime.initialize()).resolves.toBe(response);
+
+    expect(calls).toEqual(["initialize:initialized", "initialize:initialized"]);
+    expect(client.requestWithNotification).toHaveBeenCalledTimes(2);
+  });
+
+  it("resets the backend once per session, shutdown, and fresh-child boundary", async () => {
+    let running = true;
+    const runtime = new ComputerUseRuntime();
+    const backend = { reset: vi.fn() };
+    const client = {
+      isRunning: () => running,
+      requestWithNotification: vi.fn(async () => {
+        running = true;
+        return { userAgent: "test", codexHome: "/tmp/codex", platformFamily: "test", platformOs: "test" };
+      }),
+      stop: vi.fn(async () => {
+        running = false;
+      }),
+      onServerRequest: () => undefined,
+    };
+    const threadReset = vi.spyOn(runtime.threads, "reset");
+    const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+    runtimeInternals.client = client;
+    runtimeInternals.backend = backend;
+
+    runtime.resetSession();
+    expect(backend.reset).toHaveBeenCalledTimes(1);
+    expect(threadReset).not.toHaveBeenCalled();
+
+    await runtime.shutdown();
+    expect(backend.reset).toHaveBeenCalledTimes(2);
+    expect(client.stop).toHaveBeenCalledTimes(1);
+    expect(threadReset).not.toHaveBeenCalled();
+
+    await runtime.initialize();
+    expect(backend.reset).toHaveBeenCalledTimes(3);
+    expect(client.requestWithNotification).toHaveBeenCalledTimes(1);
+    expect(threadReset).not.toHaveBeenCalled();
   });
 
   it("keeps the active callTool context while a later call waits", async () => {
@@ -206,6 +334,7 @@ describe("ComputerUseRuntime lifecycle", () => {
     const firstResult = deferred<{ content: [] }>();
     const secondResult = deferred<{ content: [] }>();
     const backend = {
+      reset: vi.fn(),
       calls: [] as Array<{ cwd: string; tool: string; args: Record<string, unknown> }>,
       callTool(cwd: string, tool: string, args: Record<string, unknown>) {
         this.calls.push({ cwd, tool, args });
@@ -214,21 +343,21 @@ describe("ComputerUseRuntime lifecycle", () => {
     };
     const client = {
       isRunning: () => true,
-      request: vi.fn(async () => ({
+      requestWithNotification: vi.fn(async () => ({
         userAgent: "test",
         codexHome: "/tmp/codex",
         platformFamily: "test",
         platformOs: "test",
       })),
-      notify: vi.fn(async () => undefined),
       stop: async () => undefined,
       onServerRequest: () => undefined,
     };
     const firstConfirm = vi.fn(async () => true);
     const secondConfirm = vi.fn(async () => true);
     const runtime = new ComputerUseRuntime();
-    (runtime as unknown as { client: typeof client; backend: typeof backend }).client = client;
-    (runtime as unknown as { client: typeof client; backend: typeof backend }).backend = backend;
+    const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+    runtimeInternals.client = client;
+    runtimeInternals.backend = backend;
 
     const first = runtime.callTool(createContext("/tmp/first", firstConfirm), "inspect", { app: "First" });
     await flushPromises();
@@ -257,6 +386,7 @@ describe("ComputerUseRuntime lifecycle", () => {
     abortError.name = "AbortError";
 
     const backend = {
+      reset: vi.fn(),
       callTool: vi.fn(
         async (_cwd: string, _tool: string, _args: Record<string, unknown>, signal?: AbortSignal) => {
           if (!signal) throw new Error("missing signal");
@@ -269,13 +399,12 @@ describe("ComputerUseRuntime lifecycle", () => {
     };
     const client = {
       isRunning: () => running,
-      request: vi.fn(async () => ({
+      requestWithNotification: vi.fn(async () => ({
         userAgent: "test",
         codexHome: "/tmp/codex",
         platformFamily: "test",
         platformOs: "test",
       })),
-      notify: vi.fn(async () => undefined),
       stop: vi.fn(async () => {
         running = false;
       }),
@@ -298,23 +427,24 @@ describe("ComputerUseRuntime lifecycle", () => {
 
     expect(client.stop).toHaveBeenCalledTimes(1);
     expect(running).toBe(false);
+    expect(backend.reset).toHaveBeenCalledTimes(1);
     expect(setStatus).toHaveBeenCalledWith("codex-computer", "💻 codex: idle");
   });
   it("clears the footer when hidden, suppresses hidden updates, and restores the latest status when shown", async () => {
     const setStatus = vi.fn();
     const runtime = new ComputerUseRuntime();
     const backend = {
+      reset: vi.fn(),
       callTool: vi.fn(async () => ({ content: [] })),
     };
     const client = {
       isRunning: () => true,
-      request: vi.fn(async () => ({
+      requestWithNotification: vi.fn(async () => ({
         userAgent: "test",
         codexHome: "/tmp/codex",
         platformFamily: "test",
         platformOs: "test",
       })),
-      notify: vi.fn(async () => undefined),
       stop: async () => undefined,
       onServerRequest: () => undefined,
     };
@@ -351,17 +481,17 @@ describe("ComputerUseRuntime lifecycle", () => {
       const setStatus = vi.fn();
       let running = true;
       const backend = {
+        reset: vi.fn(),
         callTool: vi.fn(async () => ({ content: [] })),
       };
       const client = {
         isRunning: () => running,
-        request: vi.fn(async () => ({
+        requestWithNotification: vi.fn(async () => ({
           userAgent: "test",
           codexHome: "/tmp/codex",
           platformFamily: "test",
           platformOs: "test",
         })),
-        notify: vi.fn(async () => undefined),
         stop: vi.fn(async () => {
           running = false;
         }),
@@ -383,6 +513,7 @@ describe("ComputerUseRuntime lifecycle", () => {
 
       expect(client.stop).toHaveBeenCalledTimes(1);
       expect(running).toBe(false);
+      expect(backend.reset).toHaveBeenCalledTimes(1);
       expect(setStatus).toHaveBeenCalledWith("codex-computer", "💻 codex: idle");
     } finally {
       vi.useRealTimers();
