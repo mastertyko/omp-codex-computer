@@ -6,7 +6,7 @@ import type { AppServerRequest, InitializeResponse } from "./protocol";
 import { SerialQueue } from "./queue";
 import { CodexThreadManager } from "./thread-manager";
 
-const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.0" } as const;
+const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.1" } as const;
 const COMPUTER_STATUS_KEY = "codex-computer";
 const COMPUTER_STATUS_LABEL = "💻 codex";
 const STATUS_DISABLED_VALUES: Record<string, true> = {
@@ -46,7 +46,7 @@ export class ComputerUseRuntime {
   }
 
   resetSession(): void {
-    this.threads.reset();
+    this.backend.reset();
   }
 
   setStatusVisible(visible: boolean): void {
@@ -70,7 +70,7 @@ export class ComputerUseRuntime {
     logDebug("runtime.shutdown");
     this.clearIdleTimer();
     this.initializePromise = undefined;
-    this.threads.reset();
+    this.backend.reset();
     await this.client.stop();
     this.setStatus("idle");
   }
@@ -81,23 +81,21 @@ export class ComputerUseRuntime {
 
     if (!this.client.isRunning()) {
       this.initializePromise = undefined;
-      this.threads.reset();
+      this.backend.reset();
     }
     if (this.initializePromise) return this.initializePromise;
 
-    const initializePromise = this.client
-      .request<InitializeResponse>("initialize", {
+    const initializePromise = this.client.requestWithNotification<InitializeResponse>(
+      "initialize",
+      {
         clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: true },
-      })
-      .then(async (response) => {
-        await this.client.notify("initialized");
-        return response;
-      })
-      .catch((error: unknown) => {
-        if (this.initializePromise === initializePromise) this.initializePromise = undefined;
-        throw error;
-      });
+      },
+      "initialized",
+    ).catch((error: unknown) => {
+      if (this.initializePromise === initializePromise) this.initializePromise = undefined;
+      throw error;
+    });
 
     this.initializePromise = initializePromise;
     return initializePromise;
@@ -251,12 +249,14 @@ export class ComputerUseRuntime {
       return;
     }
 
+    const confirmationMessage = params.subtitle ? `${message}\n\n${params.subtitle}` : message;
+
     const signal = (ctx as ContextWithSignal).signal;
     let approved: boolean;
     try {
       approved = await ctx.ui.confirm(
         "Codex permission",
-        message,
+        confirmationMessage,
         signal ? { signal } : undefined,
       );
     } catch {
@@ -307,20 +307,36 @@ export function shouldDevAutoAccept(message: string): boolean {
     .filter(Boolean);
   if (apps.length === 0) return false;
 
-  const match = /^Allow Codex to use (.+?)\?$/.exec(message.trim());
-  if (!match) return false;
+  const currentPrefix = 'Allow Computer Use to use "';
+  const currentSuffix = '"?';
+  const legacyPrefix = "Allow Codex to use ";
+  const legacySuffix = "?";
+  let requestedApp: string | undefined;
 
-  const requestedApp = match[1].trim();
-  return apps.some((app) => app.localeCompare(requestedApp, undefined, { sensitivity: "accent" }) === 0);
+  if (message.startsWith(currentPrefix) && message.endsWith(currentSuffix)) {
+    const candidate = message.slice(currentPrefix.length, -currentSuffix.length);
+    if (candidate.length > 0 && !candidate.includes('"')) requestedApp = candidate;
+  } else if (message.startsWith(legacyPrefix) && message.endsWith(legacySuffix)) {
+    const candidate = message.slice(legacyPrefix.length, -legacySuffix.length);
+    if (candidate.length > 0) requestedApp = candidate;
+  }
+
+  if (requestedApp === undefined) return false;
+  return apps.includes(requestedApp);
 }
 
-function getElicitationParams(params: unknown): { message?: string; serverName?: string } {
+function getElicitationParams(params: unknown): { message?: string; serverName?: string; subtitle?: string } {
   if (!params || typeof params !== "object") return {};
 
   const record = params as Record<string, unknown>;
+  const meta = record.meta && typeof record.meta === "object"
+    ? record.meta as Record<string, unknown>
+    : undefined;
+  const subtitle = meta?.subtitle;
   return {
     message: typeof record.message === "string" ? record.message : undefined,
     serverName: typeof record.serverName === "string" ? record.serverName : undefined,
+    subtitle: typeof subtitle === "string" ? subtitle : undefined,
   };
 }
 

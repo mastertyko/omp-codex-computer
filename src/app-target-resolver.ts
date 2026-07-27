@@ -1,7 +1,8 @@
 export interface RegisteredAppTarget {
   displayName: string;
-  appPath: string;
+  appPath?: string;
   bundleId?: string;
+  upstreamAddress: string;
 }
 
 export type AppTargetResolution =
@@ -31,10 +32,10 @@ export type AppTargetResolution =
     };
 
 export interface ResolvedAppTarget {
-  kind: "registered_app" | "app_path" | "bundle_id" | "display_name";
+  kind: "registered_app" | "app_id" | "app_path" | "bundle_id" | "display_name";
   requested: string;
   displayName: string;
-  appPath: string;
+  appPath?: string;
   bundleId?: string;
   upstreamAddress: string;
   confidence: "exact" | "candidate";
@@ -46,6 +47,9 @@ const APP_BUNDLE_PATTERN = /\.app(?:\/)?$/i;
 const PID_PATTERN = /^(?:pid:)?\d+$/i;
 
 export function parseComputerUseAppList(text: string): RegisteredAppTarget[] {
+  const jsonApps = parseComputerUseAppJsonList(text);
+  if (jsonApps !== undefined) return jsonApps;
+
   const apps: RegisteredAppTarget[] = [];
   const seen = new Set<string>();
 
@@ -53,7 +57,7 @@ export function parseComputerUseAppList(text: string): RegisteredAppTarget[] {
     const parsed = parseComputerUseAppLine(line);
     if (!parsed) continue;
 
-    const key = `${normalize(parsed.displayName)}\0${normalizePath(parsed.appPath)}\0${normalize(parsed.bundleId ?? "")}`;
+    const key = `${normalize(parsed.displayName)}\0${normalizePath(parsed.appPath ?? "")}\0${normalize(parsed.bundleId ?? "")}`;
     if (seen.has(key)) continue;
     seen.add(key);
     apps.push(parsed);
@@ -62,9 +66,63 @@ export function parseComputerUseAppList(text: string): RegisteredAppTarget[] {
   return apps;
 }
 
+function parseComputerUseAppJsonList(text: string): RegisteredAppTarget[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+
+  return parseComputerUseAppJsonValue(parsed);
+}
+
+function parseComputerUseAppJsonValue(value: unknown): RegisteredAppTarget[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const apps: RegisteredAppTarget[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of value) {
+    const app = parseComputerUseAppJsonEntry(entry);
+    if (!app || seen.has(app.upstreamAddress)) continue;
+
+    seen.add(app.upstreamAddress);
+    apps.push(app);
+  }
+
+  return apps;
+}
+
+function parseComputerUseAppJsonEntry(value: unknown): RegisteredAppTarget | undefined {
+  if (!isPlainObject(value)) return undefined;
+
+  const { id, displayName } = value;
+  if (typeof id !== "string" || !id.trim()) return undefined;
+  if (displayName !== undefined && typeof displayName !== "string") return undefined;
+
+  const upstreamAddress = id.trim();
+  return {
+    displayName: displayName?.trim() || upstreamAddress,
+    upstreamAddress,
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function resolveAppTargetFromList(requested: string, appListText: string): AppTargetResolution {
+  return resolveAppTarget(requested, parseComputerUseAppList(appListText));
+}
+
+export function resolveAppTargetFromStructuredList(requested: string, value: unknown): AppTargetResolution | undefined {
+  const registeredApps = parseComputerUseAppJsonValue(value);
+  return registeredApps === undefined ? undefined : resolveAppTarget(requested, registeredApps);
+}
+
+function resolveAppTarget(requested: string, registeredApps: RegisteredAppTarget[]): AppTargetResolution {
   const trimmed = requested.trim();
-  const registeredApps = parseComputerUseAppList(appListText);
 
   if (isPidTarget(trimmed)) {
     return {
@@ -115,7 +173,7 @@ export function resolveAppTargetFromList(requested: string, appListText: string)
       displayName: app.displayName,
       appPath: app.appPath,
       bundleId: app.bundleId,
-      upstreamAddress: recommendedUpstreamAddress(app),
+      upstreamAddress: app.upstreamAddress,
       confidence: "candidate" as const,
     }));
 
@@ -137,7 +195,7 @@ export function formatAppTargetResolution(resolution: AppTargetResolution): stri
       `match: ${target.kind}`,
       `displayName: ${target.displayName}`,
       `bundleId: ${target.bundleId ?? "(none)"}`,
-      `appPath: ${target.appPath}`,
+      `appPath: ${target.appPath ?? "(not provided)"}`,
       `recommendedAddress: ${target.upstreamAddress}`,
       "canUseComputerUseState: true",
     ].join("\n");
@@ -150,7 +208,7 @@ export function formatAppTargetResolution(resolution: AppTargetResolution): stri
       "Candidates:",
       ...formatCandidates(resolution.candidates),
       "",
-      "Use a bundle id or .app path to disambiguate before using mutating Computer Use tools.",
+      "Use a canonical app id, bundle id, or .app path to disambiguate before using mutating Computer Use tools.",
     ].join("\n");
   }
 
@@ -205,8 +263,10 @@ export function formatInvalidAppDiagnostic(
   requested: string,
   appListText: string,
   listAppsError?: string,
+  structuredContent?: unknown,
 ): string {
-  const resolution = resolveAppTargetFromList(requested, appListText);
+  const resolution =
+    resolveAppTargetFromStructuredList(requested, structuredContent) ?? resolveAppTargetFromList(requested, appListText);
   const lines = [
     originalMessage.trim() || `Invalid app: ${requested}`,
     "",
@@ -238,15 +298,17 @@ function parseComputerUseAppLine(line: string): RegisteredAppTarget | undefined 
     displayName,
     appPath,
     bundleId: bundleId || undefined,
+    upstreamAddress: bundleId || appPath || displayName,
   };
 }
 
 function matchKind(requested: string, app: RegisteredAppTarget): ResolvedAppTarget["kind"] | undefined {
   const normalizedRequest = normalize(requested);
   if (normalizedRequest && normalize(app.bundleId ?? "") === normalizedRequest) return "bundle_id";
-  if (normalizePath(app.appPath) === normalizePath(requested)) return "app_path";
+  if (app.appPath && normalizePath(app.appPath) === normalizePath(requested)) return "app_path";
+  if (normalize(app.upstreamAddress) === normalizedRequest) return "app_id";
   if (normalize(app.displayName) === normalizedRequest) return "display_name";
-  if (normalize(appBundleBasename(app.appPath)) === normalizedRequest) return "display_name";
+  if (app.appPath && normalize(appBundleBasename(app.appPath)) === normalizedRequest) return "display_name";
   return undefined;
 }
 
@@ -263,7 +325,7 @@ function toResolvedTarget(
     displayName: app.displayName,
     appPath: app.appPath,
     bundleId: app.bundleId,
-    upstreamAddress: recommendedUpstreamAddress(app),
+    upstreamAddress: app.upstreamAddress,
     confidence,
   };
 }
@@ -272,9 +334,9 @@ function isCandidate(requested: string, app: RegisteredAppTarget): boolean {
   const normalizedRequest = normalize(requested);
   if (!normalizedRequest) return false;
 
-  return [app.displayName, app.bundleId ?? "", app.appPath, appBundleBasename(app.appPath)]
-    .map(normalize)
-    .some((value) => value.includes(normalizedRequest));
+  const values = [app.displayName, app.bundleId, app.appPath, app.upstreamAddress];
+  if (app.appPath) values.push(appBundleBasename(app.appPath));
+  return values.some((value) => value !== undefined && normalize(value).includes(normalizedRequest));
 }
 
 function isPidTarget(value: string): boolean {
@@ -287,9 +349,6 @@ function isRawExecutablePath(value: string): boolean {
   return trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.includes("/target/") || trimmed.includes("/.build/");
 }
 
-function recommendedUpstreamAddress(app: RegisteredAppTarget): string {
-  return app.bundleId || app.appPath || app.displayName;
-}
 
 function appBundleBasename(appPath: string): string {
   const cleanPath = appPath.replace(/\/+$/, "");
@@ -308,7 +367,7 @@ function normalizePath(value: string): string {
 function formatCandidates(candidates: ResolvedAppTarget[]): string[] {
   return candidates.map((candidate, index) => {
     const bundle = candidate.bundleId ? ` — ${candidate.bundleId}` : "";
-    return `${index + 1}. ${candidate.displayName}${bundle} — ${candidate.appPath} — recommended: ${candidate.upstreamAddress}`;
+    return `${index + 1}. ${candidate.displayName}${bundle} — ${candidate.appPath ?? "(not provided)"} — recommended: ${candidate.upstreamAddress}`;
   });
 }
 
