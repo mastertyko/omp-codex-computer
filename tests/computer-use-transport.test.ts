@@ -421,6 +421,74 @@ describe("ComputerUseTransport", () => {
     expect(result._meta).toBe(meta);
   });
 
+  it("sniffs local Sky screenshot bytes before emitting image content", async () => {
+    const marketplaceRoot = join(TEST_ROOT, "screenshot-mime-marketplace");
+    const pluginRoot = join(marketplaceRoot, "computer-use");
+    const wrapperPath = join(pluginRoot, "scripts", "computer-use-client.mjs");
+    mkdirSync(dirname(wrapperPath), { recursive: true });
+    const methods = COMPUTER_USE_MCP_TOOL_NAMES.map((toolName) => toolName === "get_app_state"
+      ? `${JSON.stringify(toolName)}: async (args) => ({ app: "Fixture", text: "Accessible application state", screenshot: { url: args.app } })`
+      : `${JSON.stringify(toolName)}: async () => null`).join(",\n");
+    writeFileSync(wrapperPath, `export async function setupComputerUseRuntime() {
+  return { target: "mac", ${methods} };
+}\n`);
+
+    const executeCase = async (fileName: string, bytes: Buffer) => {
+      const screenshotPath = join(marketplaceRoot, fileName);
+      writeFileSync(screenshotPath, bytes);
+      const client = new FakeClient();
+      client.pluginResponse = currentPluginList({ marketplacePath: marketplaceRoot, pluginPath: pluginRoot });
+      client.mcpResponse = { data: [nodeReplServer()] };
+      client.toolResponses.push(
+        skySuccess("bootstrap"),
+        skySuccess("dispatch", { app: "Fixture", text: "Accessible application state" }),
+      );
+      const transport = new ComputerUseTransport(client, new FakeThreads());
+      await transport.callTool("/work", "get_app_state", { app: pathToFileURL(screenshotPath).href });
+
+      const dispatch = toolRequests(client)[1];
+      if (!dispatch) throw new Error("Expected a Sky dispatch request");
+      const emitted: unknown[] = [];
+      const envelopes: unknown[] = [];
+      const nodeRepl = {
+        emitImage: async (image: unknown) => { emitted.push(image); },
+        write: (value: string) => { envelopes.push(JSON.parse(value)); },
+      };
+      const fixtureKey = "__ompComputerUseNodeReplFixture";
+      const programPath = join(marketplaceRoot, `${fileName}.program.mjs`);
+      writeFileSync(
+        programPath,
+        `const nodeRepl = Reflect.get(globalThis, ${JSON.stringify(fixtureKey)});\n${programFrom(dispatch)}\n`,
+      );
+      Reflect.set(globalThis, fixtureKey, nodeRepl);
+      try {
+        // The dispatch program path is generated at runtime to exercise its dynamic plugin import.
+        await import(pathToFileURL(programPath).href);
+      } finally {
+        Reflect.deleteProperty(globalThis, fixtureKey);
+      }
+      return { emitted, envelopes };
+    };
+
+    const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+    const jpeg = await executeCase("fixture.jpg", jpegBytes);
+    expect(jpeg.emitted).toHaveLength(1);
+    expect(jpeg.emitted[0]).toMatchObject({ bytes: jpegBytes, mimeType: "image/jpeg" });
+
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = await executeCase("fixture.png", pngBytes);
+    expect(png.emitted).toHaveLength(1);
+    expect(png.emitted[0]).toMatchObject({ bytes: pngBytes, mimeType: "image/png" });
+
+    const unsupported = await executeCase("fixture.bin", Buffer.from("not an image"));
+    expect(unsupported.emitted).toEqual([]);
+    expect(unsupported.envelopes.at(-1)).toMatchObject({
+      ok: true,
+      phase: "dispatch",
+      warning: "Warning: Computer Use returned a screenshot that could not be read.",
+    });
+  });
+
   it("adapts string element indexes and selection names for Sky", async () => {
     const client = new FakeClient();
     client.pluginResponse = currentPluginList();

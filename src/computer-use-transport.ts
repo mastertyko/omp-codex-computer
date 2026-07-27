@@ -557,10 +557,18 @@ function buildSkyDispatchSource(payloadLiteral: string): string {
             // This generated program runs in node_repl, where static imports are unavailable.
             const fs = await import("node:fs/promises");
             const url = await import("node:url");
-            await nodeRepl.emitImage({
-              bytes: await fs.readFile(url.fileURLToPath(parsedScreenshotUrl)),
-              mimeType: "image/png",
-            });
+            const bytes = await fs.readFile(url.fileURLToPath(parsedScreenshotUrl));
+            let mimeType;
+            if (bytes.length >= 8
+              && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+              && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
+              mimeType = "image/png";
+            } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+              mimeType = "image/jpeg";
+            } else {
+              throw new Error("unsupported screenshot image format");
+            }
+            await nodeRepl.emitImage({ bytes, mimeType });
           }
         } catch {
           warning = ${JSON.stringify(SCREENSHOT_WARNING)};
