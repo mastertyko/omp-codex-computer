@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import type * as FsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,38 +151,28 @@ interface SkyPluginTree {
   pluginRoot: string;
 }
 
-const WORKING_WRAPPER_SOURCE = `
-export async function setupComputerUseRuntime() {
-  return {
-    target: "mac",
-    list_apps: async () => [],
-    get_app_state: async () => null,
-    click: async () => null,
-    type_text: async () => null,
-    press_key: async () => null,
-    scroll: async () => null,
-    drag: async () => null,
-    set_value: async () => null,
-    select_text: async () => null,
-    perform_secondary_action: async () => null,
-  };
-}
-`;
+const WORKING_SKY = {
+  target: "mac",
+  list_apps: async () => [],
+  get_app_state: async () => null,
+  click: async () => null,
+  type_text: async () => null,
+  press_key: async () => null,
+  scroll: async () => null,
+  drag: async () => null,
+  set_value: async () => null,
+  select_text: async () => null,
+  perform_secondary_action: async () => null,
+};
 
-const BROKEN_WRAPPER_SOURCE = `
-export async function setupComputerUseRuntime() {
-  return { target: "mac" };
-}
-`;
+const BROKEN_SKY = { target: "mac" };
 
-async function createSkyPluginTree(wrapperSource = WORKING_WRAPPER_SOURCE): Promise<SkyPluginTree> {
+async function createSkyPluginTree(): Promise<SkyPluginTree> {
   const root = await mkdtemp(join(tmpdir(), "omp-status-"));
   mockState.tempRoots.push(root);
   const marketplaceRoot = join(root, "openai-bundled");
   const pluginRoot = join(marketplaceRoot, "computer-use");
-  const scriptsRoot = join(pluginRoot, "scripts");
-  await mkdir(scriptsRoot, { recursive: true });
-  await writeFile(join(scriptsRoot, "computer-use-client.mjs"), wrapperSource, "utf8");
+  await mkdir(pluginRoot, { recursive: true });
   return { marketplaceRoot, pluginRoot };
 }
 
@@ -190,7 +180,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-async function runNodeReplBootstrap(params: unknown): Promise<unknown> {
+async function runNodeReplBootstrap(params: unknown, sky: unknown = WORKING_SKY): Promise<unknown> {
   if (!isRecord(params) || !isRecord(params.arguments) || typeof params.arguments.code !== "string") {
     throw new Error("Expected a node_repl bootstrap request");
   }
@@ -207,7 +197,7 @@ async function runNodeReplBootstrap(params: unknown): Promise<unknown> {
   ) => Promise<void>;
   await execute(
     { write: (value) => writes.push(value) },
-    (specifier) => import(specifier),
+    (specifier) => specifier === "@oai/sky" ? Promise.resolve({ sky }) : import(specifier),
   );
   return { content: writes.map((text) => ({ type: "text", text })) };
 }
@@ -557,7 +547,7 @@ describe("checkComputerUseStatus", () => {
     expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 
-  it("observes Sky through thread creation and a real wrapper bootstrap without exposing probe payloads", async () => {
+  it("observes Sky through thread creation and a real @oai/sky bootstrap without exposing probe payloads", async () => {
     const tree = await createSkyPluginTree();
     const pluginResponse = plugins([{
       name: "openai-bundled",
@@ -606,11 +596,12 @@ describe("checkComputerUseStatus", () => {
     const bootstrapCode = bootstrapCall.params.arguments.code;
     expect(bootstrapCode).toEqual(expect.any(String));
     expect(bootstrapCode).not.toContain("node-repl-schema-secret");
+    expect(bootstrapCode).toContain('await import("@oai/sky")');
 
     const payload = JSON.stringify(status);
     expect(payload).not.toContain("node-repl-schema-secret");
     expect(payload).not.toContain("Computer Use bootstrap");
-    expect(payload).not.toContain("setupComputerUseRuntime");
+    expect(payload).not.toContain("@oai/sky");
     expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 
@@ -647,8 +638,8 @@ describe("checkComputerUseStatus", () => {
     expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 
-  it("does not claim readiness when the observed Sky wrapper bootstrap fails", async () => {
-    const tree = await createSkyPluginTree(BROKEN_WRAPPER_SOURCE);
+  it("does not claim readiness when the observed Sky package bootstrap fails", async () => {
+    const tree = await createSkyPluginTree();
     useDiscovery(
       plugins([{
         name: "openai-bundled",
@@ -656,6 +647,7 @@ describe("checkComputerUseStatus", () => {
         plugin: plugin({ source: { path: tree.pluginRoot } }),
       }]),
       mcp({ directToolNames: [], nodeReplToolNames: ["js"] }),
+      (params) => runNodeReplBootstrap(params, BROKEN_SKY),
     );
 
     const status = await checkComputerUseStatus("/tmp/project");
@@ -678,7 +670,7 @@ describe("checkComputerUseStatus", () => {
   });
 
   it("reports an observed direct fallback when Sky bootstrap fails", async () => {
-    const tree = await createSkyPluginTree(BROKEN_WRAPPER_SOURCE);
+    const tree = await createSkyPluginTree();
     useDiscovery(
       plugins([{
         name: "openai-bundled",
@@ -689,6 +681,7 @@ describe("checkComputerUseStatus", () => {
         directToolNames: [...REQUIRED_MCP_TOOL_NAMES],
         nodeReplToolNames: ["js"],
       }),
+      (params) => runNodeReplBootstrap(params, BROKEN_SKY),
     );
 
     const status = await checkComputerUseStatus("/tmp/project");

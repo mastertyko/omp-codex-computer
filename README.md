@@ -70,7 +70,7 @@ Set `OMP_CODEX_COMPUTER_STATUS=off` before starting OMP to default the footer st
 
 The adapter negotiates the transport from capabilities reported by Codex app-server:
 
-- Current Codex: `app-server → node_repl/js → computer-use-client.mjs → Sky`.
+- Current Codex: `app-server → node_repl/js → @oai/sky → Sky`.
 - Legacy Codex: direct `computer-use` MCP, only when that server advertises all required tools.
 
 Sky is preferred when both routes are available. Fallback is allowed only when Sky bootstrap fails before an action is dispatched; the adapter never falls back after dispatch because that could repeat a click or typed text. Public OMP tool names and approval levels remain unchanged.

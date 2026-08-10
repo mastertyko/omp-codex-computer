@@ -1,6 +1,3 @@
-import { realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { AppServerClient } from "./app-server-client";
 import {
   DEFAULT_DIRECT_MCP_SERVER_NAME,
@@ -43,7 +40,6 @@ interface RawMcpToolCallResponse {
 
 interface SelectedSkyRoute {
   kind: "sky";
-  wrapperPath: string;
   nodeReplServerName: string;
 }
 
@@ -73,7 +69,6 @@ interface SkyErrorDetails {
 const SKY_ENVELOPE_PROTOCOL = "omp-codex-computer/sky-v1" as const;
 const SCREENSHOT_WARNING = "Warning: Computer Use returned a screenshot that could not be read.";
 const NODE_REPL_EXECUTION_TIMEOUT_MS = 120_000;
-const SKY_WRAPPER_RELATIVE_PATH = ["scripts", "computer-use-client.mjs"] as const;
 const TOOL_NAME_LOOKUP = Object.fromEntries(
   COMPUTER_USE_MCP_TOOL_NAMES.map((toolName) => [toolName, true] as const),
 ) as Record<string, true>;
@@ -114,12 +109,6 @@ export class SkyComputerUseProtocolError extends Error {
   }
 }
 
-class SkyComputerUseTrustError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SkyComputerUseTrustError";
-  }
-}
 
 export class ComputerUseTransport {
   private readonly directMcpServerName: string;
@@ -219,16 +208,9 @@ export class ComputerUseTransport {
     const capabilities = evaluateCapabilitiesForDirectServer(plugins, mcp, this.directMcpServerName);
 
     if (capabilities.preferredRoute === "sky") {
-      const pluginRoot = capabilities.pluginRoot;
-      const marketplaceRoot = capabilities.marketplaceRoot;
-      if (!pluginRoot || !marketplaceRoot) {
-        throw new Error("Computer Use Sky route selected without trusted absolute plugin roots");
-      }
-
       try {
         const skyRoute: SelectedSkyRoute = {
           kind: "sky",
-          wrapperPath: await resolveTrustedSkyWrapperPath(marketplaceRoot, pluginRoot),
           nodeReplServerName: capabilities.nodeRepl.name,
         };
         await this.bootstrapSky(skyRoute, cwd, signal);
@@ -236,9 +218,7 @@ export class ComputerUseTransport {
         return skyRoute;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
-        if (error instanceof SkyComputerUseTrustError
-          || getNumericErrorCode(error) === -10012
-          || !capabilities.direct.complete) throw error;
+        if (getNumericErrorCode(error) === -10012 || !capabilities.direct.complete) throw error;
 
         logDebug("computer-use.transport.bootstrap-fallback", {
           route: "direct",
@@ -263,7 +243,7 @@ export class ComputerUseTransport {
       threadId,
       tool: "js",
       arguments: {
-        code: buildSkyProgram(route.wrapperPath),
+        code: buildSkyProgram(),
         title: "Computer Use bootstrap",
         timeout_ms: NODE_REPL_EXECUTION_TIMEOUT_MS,
       },
@@ -304,7 +284,7 @@ export class ComputerUseTransport {
       threadId,
       tool: "js",
       arguments: {
-        code: buildSkyProgram(route.wrapperPath, payload),
+        code: buildSkyProgram(payload),
         title: `Computer Use: ${tool}`,
         timeout_ms: NODE_REPL_EXECUTION_TIMEOUT_MS,
       },
@@ -315,30 +295,6 @@ export class ComputerUseTransport {
   }
 }
 
-async function resolveTrustedSkyWrapperPath(marketplaceRoot: string, pluginRoot: string): Promise<string> {
-  const [canonicalMarketplaceRoot, canonicalPluginRoot] = await Promise.all([
-    realpath(marketplaceRoot),
-    realpath(pluginRoot),
-  ]);
-  if (!isStrictlyWithin(canonicalMarketplaceRoot, canonicalPluginRoot)) {
-    throw new SkyComputerUseTrustError("Computer Use plugin canonical root escapes its official marketplace");
-  }
-
-  const wrapperPath = join(pluginRoot, ...SKY_WRAPPER_RELATIVE_PATH);
-  const canonicalWrapperPath = await realpath(wrapperPath);
-  if (!isStrictlyWithin(canonicalPluginRoot, canonicalWrapperPath)) {
-    throw new SkyComputerUseTrustError("Computer Use wrapper canonical path escapes its plugin root");
-  }
-  return canonicalWrapperPath;
-}
-
-function isStrictlyWithin(parent: string, child: string): boolean {
-  const relativePath = relative(parent, child);
-  return relativePath !== ""
-    && relativePath !== ".."
-    && !relativePath.startsWith(`..${sep}`)
-    && !isAbsolute(relativePath);
-}
 
 function evaluateCapabilitiesForDirectServer(
   plugins: PluginListResponse,
@@ -364,7 +320,6 @@ function unavailableTransportError(capabilities: ComputerUseCapabilities): Error
   else {
     if (!capabilities.pluginMatch.plugin.installed) skyMissing.push("installed plugin");
     if (!capabilities.pluginMatch.plugin.enabled) skyMissing.push("enabled plugin");
-    if (!capabilities.pluginRoot) skyMissing.push("absolute plugin source.path");
   }
   if (!capabilities.nodeRepl.complete) {
     skyMissing.push(`${capabilities.nodeRepl.name}/${capabilities.nodeRepl.missingToolNames.join(",")}`);
@@ -466,10 +421,8 @@ function copySkyElementIndex(
   adapted.element_index = elementIndex;
 }
 
-function buildSkyProgram(wrapperPath: string, payloadBase64?: string): string {
-  const wrapperUrl = pathToFileURL(wrapperPath).href;
+function buildSkyProgram(payloadBase64?: string): string {
   const protocolLiteral = JSON.stringify(SKY_ENVELOPE_PROTOCOL);
-  const wrapperUrlLiteral = JSON.stringify(wrapperUrl);
   const methodNamesLiteral = JSON.stringify(COMPUTER_USE_MCP_TOOL_NAMES);
   const payloadLiteral = payloadBase64 === undefined ? undefined : JSON.stringify(payloadBase64);
   const dispatch = payloadLiteral === undefined
@@ -497,14 +450,10 @@ function buildSkyProgram(wrapperPath: string, payloadBase64?: string): string {
   };
 
   try {
-    // The plugin path is selected at runtime, so this import cannot be static.
-    const wrapper = await import(${wrapperUrlLiteral});
-    if (typeof wrapper.setupComputerUseRuntime !== "function") {
-      throw new Error("Computer Use plugin wrapper is missing setupComputerUseRuntime");
-    }
-    const sky = await wrapper.setupComputerUseRuntime({ globals: globalThis });
+    const skyModule = await import("@oai/sky");
+    const sky = skyModule && typeof skyModule === "object" ? skyModule.sky : undefined;
     if (!sky || typeof sky !== "object" || sky.target !== "mac") {
-      throw new Error("Computer Use Sky runtime did not provide the mac target");
+      throw new Error("Bundled @oai/sky did not provide the mac target");
     }
     for (const method of requiredMethods) {
       if (typeof sky[method] !== "function") throw new Error("Computer Use Sky runtime is missing " + method);

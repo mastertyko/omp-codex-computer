@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import type { AppServerClient } from "../src/app-server-client";
@@ -14,10 +14,8 @@ const TEST_ROOT = mkdtempSync(join(tmpdir(), "omp-computer-use-transport-"));
 const MARKETPLACE_ROOT = join(TEST_ROOT, "marketplace");
 const MARKETPLACE_DESCRIPTOR_PATH = join(MARKETPLACE_ROOT, ".agents", "plugins", "marketplace.json");
 const PLUGIN_ROOT = join(MARKETPLACE_ROOT, "computer-use");
-const WRAPPER_PATH = join(PLUGIN_ROOT, "scripts", "computer-use-client.mjs");
 
-mkdirSync(dirname(WRAPPER_PATH), { recursive: true });
-writeFileSync(WRAPPER_PATH, "export const fixture = true;\n");
+mkdirSync(MARKETPLACE_ROOT, { recursive: true });
 afterAll(() => rmSync(TEST_ROOT, { recursive: true, force: true }));
 
 type SkyPhase = "bootstrap" | "dispatch";
@@ -93,6 +91,7 @@ function currentPluginList(options: {
   pluginPath?: string;
   installed?: boolean;
   enabled?: boolean;
+  includePluginSource?: boolean;
 } = {}): PluginListResponse {
   return {
     marketplaces: [
@@ -107,7 +106,7 @@ function currentPluginList(options: {
             enabled: options.enabled ?? true,
             installPolicy: "bundled",
             authPolicy: "none",
-            source: { path: options.pluginPath ?? PLUGIN_ROOT },
+            ...(options.includePluginSource === false ? {} : { source: { path: options.pluginPath ?? PLUGIN_ROOT } }),
           },
         ],
       },
@@ -226,7 +225,8 @@ describe("ComputerUseTransport", () => {
       arguments: { title: "Computer Use: list_apps", timeout_ms: 120_000 },
     });
     expect(programFrom(bootstrap)).not.toContain('phase = "dispatch"');
-    expect(programFrom(bootstrap)).toContain(pathToFileURL(realpathSync(WRAPPER_PATH)).href);
+    expect(programFrom(bootstrap)).toContain('await import("@oai/sky")');
+    expect(programFrom(bootstrap)).not.toContain("computer-use-client.mjs");
     expect(decodeSkyPayload(programFrom(dispatch))).toEqual({ tool: "list_apps", args: {} });
   });
 
@@ -298,64 +298,10 @@ describe("ComputerUseTransport", () => {
     expect(toolRequests(client).map((call) => call.params.server)).toEqual(["computer-use"]);
   });
 
-  it("falls back to complete direct MCP when the trusted legacy plugin has no Sky wrapper", async () => {
-    const marketplaceRoot = join(TEST_ROOT, "legacy-direct-marketplace");
+  it("uses the bundled Sky package when the current plugin has no wrapper asset", async () => {
+    const marketplaceRoot = join(TEST_ROOT, "current-node-repl-marketplace");
     const pluginRoot = join(marketplaceRoot, "computer-use");
     mkdirSync(pluginRoot, { recursive: true });
-
-    const client = new FakeClient();
-    client.pluginResponse = currentPluginList({ marketplacePath: marketplaceRoot, pluginPath: pluginRoot });
-    client.mcpResponse = { data: [nodeReplServer(), directServer()] };
-    client.toolResponses.push({ content: [{ type: "text", text: "legacy apps" }] });
-    const transport = new ComputerUseTransport(client, new FakeThreads());
-
-    const result = await transport.callTool("/work", "list_apps", {});
-
-    expect(result.route).toBe("direct");
-    expect(toolRequests(client).map((call) => call.params.server)).toEqual(["computer-use"]);
-  });
-
-  it("rejects a plugin source path that lexically escapes its marketplace", async () => {
-    const client = new FakeClient();
-    client.pluginResponse = currentPluginList({ pluginPath: join(TEST_ROOT, "escaped-plugin") });
-    client.mcpResponse = { data: [nodeReplServer()] };
-    const transport = new ComputerUseTransport(client, new FakeThreads());
-
-    await expect(transport.callTool("/work", "list_apps", {})).rejects.toThrow(
-      "Computer Use transport is unavailable",
-    );
-    expect(toolRequests(client)).toHaveLength(0);
-  });
-
-  it("rejects a plugin whose canonical root escapes its marketplace", async () => {
-    const marketplaceRoot = join(TEST_ROOT, "canonical-plugin-marketplace");
-    const pluginRoot = join(marketplaceRoot, "computer-use");
-    const outsidePluginRoot = join(TEST_ROOT, "canonical-plugin-outside");
-    const outsideWrapper = join(outsidePluginRoot, "scripts", "computer-use-client.mjs");
-    mkdirSync(marketplaceRoot, { recursive: true });
-    mkdirSync(dirname(outsideWrapper), { recursive: true });
-    writeFileSync(outsideWrapper, "export const fixture = true;\n");
-    symlinkSync(outsidePluginRoot, pluginRoot, "dir");
-
-    const client = new FakeClient();
-    client.pluginResponse = currentPluginList({ marketplacePath: marketplaceRoot, pluginPath: pluginRoot });
-    client.mcpResponse = { data: [nodeReplServer(), directServer()] };
-    const transport = new ComputerUseTransport(client, new FakeThreads());
-
-    await expect(transport.callTool("/work", "list_apps", {})).rejects.toThrow(
-      "plugin canonical root escapes",
-    );
-    expect(toolRequests(client)).toHaveLength(0);
-  });
-
-  it("imports the canonical wrapper path when the trusted wrapper is a symlink", async () => {
-    const marketplaceRoot = join(TEST_ROOT, "canonical-wrapper-marketplace");
-    const pluginRoot = join(marketplaceRoot, "computer-use");
-    const wrapperPath = join(pluginRoot, "scripts", "computer-use-client.mjs");
-    const canonicalWrapperPath = join(pluginRoot, "scripts", "canonical-client.mjs");
-    mkdirSync(dirname(wrapperPath), { recursive: true });
-    writeFileSync(canonicalWrapperPath, "export const fixture = true;\n");
-    symlinkSync("canonical-client.mjs", wrapperPath);
 
     const client = new FakeClient();
     client.pluginResponse = currentPluginList({ marketplacePath: marketplaceRoot, pluginPath: pluginRoot });
@@ -367,29 +313,19 @@ describe("ComputerUseTransport", () => {
 
     const [bootstrap] = toolRequests(client);
     if (!bootstrap) throw new Error("Expected a Sky bootstrap request");
-    const program = programFrom(bootstrap);
-    expect(program).toContain(pathToFileURL(realpathSync(canonicalWrapperPath)).href);
-    expect(program).not.toContain(pathToFileURL(wrapperPath).href);
+    expect(programFrom(bootstrap)).toContain('await import("@oai/sky")');
+    expect(programFrom(bootstrap)).not.toContain("computer-use-client.mjs");
   });
 
-  it("rejects a wrapper whose canonical path escapes its plugin root", async () => {
-    const marketplaceRoot = join(TEST_ROOT, "escaping-wrapper-marketplace");
-    const pluginRoot = join(marketplaceRoot, "computer-use");
-    const wrapperPath = join(pluginRoot, "scripts", "computer-use-client.mjs");
-    const outsideWrapperPath = join(TEST_ROOT, "outside-computer-use-client.mjs");
-    mkdirSync(dirname(wrapperPath), { recursive: true });
-    writeFileSync(outsideWrapperPath, "export const fixture = true;\n");
-    symlinkSync(outsideWrapperPath, wrapperPath);
-
+  it("does not require a plugin source path for the current Sky route", async () => {
     const client = new FakeClient();
-    client.pluginResponse = currentPluginList({ marketplacePath: marketplaceRoot, pluginPath: pluginRoot });
-    client.mcpResponse = { data: [nodeReplServer(), directServer()] };
+    client.pluginResponse = currentPluginList({ includePluginSource: false });
+    client.mcpResponse = { data: [nodeReplServer()] };
+    client.toolResponses.push(skySuccess("bootstrap"));
     const transport = new ComputerUseTransport(client, new FakeThreads());
 
-    await expect(transport.callTool("/work", "list_apps", {})).rejects.toThrow(
-      "wrapper canonical path escapes",
-    );
-    expect(toolRequests(client)).toHaveLength(0);
+    await expect(transport.prepare("/work")).resolves.toBe("sky");
+    expect(toolRequests(client)).toHaveLength(1);
   });
 
   it("normalizes get_app_state into ordered text and PNG image content", async () => {
@@ -424,14 +360,16 @@ describe("ComputerUseTransport", () => {
   it("sniffs local Sky screenshot bytes before emitting image content", async () => {
     const marketplaceRoot = join(TEST_ROOT, "screenshot-mime-marketplace");
     const pluginRoot = join(marketplaceRoot, "computer-use");
-    const wrapperPath = join(pluginRoot, "scripts", "computer-use-client.mjs");
-    mkdirSync(dirname(wrapperPath), { recursive: true });
-    const methods = COMPUTER_USE_MCP_TOOL_NAMES.map((toolName) => toolName === "get_app_state"
-      ? `${JSON.stringify(toolName)}: async (args) => ({ app: "Fixture", text: "Accessible application state", screenshot: { url: args.app } })`
-      : `${JSON.stringify(toolName)}: async () => null`).join(",\n");
-    writeFileSync(wrapperPath, `export async function setupComputerUseRuntime() {
-  return { target: "mac", ${methods} };
-}\n`);
+    mkdirSync(marketplaceRoot, { recursive: true });
+    const sky = Object.fromEntries(
+      COMPUTER_USE_MCP_TOOL_NAMES.map((toolName) => [toolName, async () => null]),
+    ) as Record<string, unknown>;
+    sky.target = "mac";
+    sky.get_app_state = async (args: { app: string }) => ({
+      app: "Fixture",
+      text: "Accessible application state",
+      screenshot: { url: args.app },
+    });
 
     const executeCase = async (fileName: string, bytes: Buffer) => {
       const screenshotPath = join(marketplaceRoot, fileName);
@@ -456,13 +394,16 @@ describe("ComputerUseTransport", () => {
       };
       const fixtureKey = "__ompComputerUseNodeReplFixture";
       const programPath = join(marketplaceRoot, `${fileName}.program.mjs`);
+      const executableProgram = programFrom(dispatch).replace(
+        'await import("@oai/sky")',
+        'await dynamicImport("@oai/sky")',
+      );
       writeFileSync(
         programPath,
-        `const nodeRepl = Reflect.get(globalThis, ${JSON.stringify(fixtureKey)});\n${programFrom(dispatch)}\n`,
+        `const fixture = Reflect.get(globalThis, ${JSON.stringify(fixtureKey)});\nconst nodeRepl = fixture.nodeRepl;\nconst dynamicImport = async (specifier) => specifier === "@oai/sky" ? { sky: fixture.sky } : import(specifier);\n${executableProgram}\n`,
       );
-      Reflect.set(globalThis, fixtureKey, nodeRepl);
+      Reflect.set(globalThis, fixtureKey, { nodeRepl, sky });
       try {
-        // The dispatch program path is generated at runtime to exercise its dynamic plugin import.
         await import(pathToFileURL(programPath).href);
       } finally {
         Reflect.deleteProperty(globalThis, fixtureKey);
@@ -537,8 +478,8 @@ describe("ComputerUseTransport", () => {
     expect(program).not.toContain(adversarialText);
     expect(decodeSkyPayload(program)).toEqual({ tool: "type_text", args });
     expect(program).toContain('let phase = "bootstrap"');
-    expect(program).toContain("await wrapper.setupComputerUseRuntime({ globals: globalThis })");
-    expect(program.indexOf('phase = "dispatch"')).toBeGreaterThan(program.indexOf("setupComputerUseRuntime"));
+    expect(program).toContain('const skyModule = await import("@oai/sky")');
+    expect(program.indexOf('phase = "dispatch"')).toBeGreaterThan(program.indexOf('await import("@oai/sky")'));
   });
 
   it("preserves legacy direct calls when all ten public MCP tools are available", async () => {
