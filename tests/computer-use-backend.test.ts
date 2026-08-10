@@ -1,22 +1,11 @@
 import { EventEmitter, once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AppServerRequestError, type AppServerClient } from "../src/app-server-client";
 import { ComputerUseBackend } from "../src/computer-use-backend";
 import { COMPUTER_USE_MCP_TOOL_NAMES } from "../src/computer-use-tools";
 import type { McpServerStatus, McpServerStatusListResponse, PluginListResponse } from "../src/protocol";
 
 const SKY_PROTOCOL = "omp-codex-computer/sky-v1";
-const TEST_ROOT = mkdtempSync(join(tmpdir(), "omp-computer-use-backend-"));
-const MARKETPLACE_ROOT = join(TEST_ROOT, "marketplace");
-const PLUGIN_ROOT = join(MARKETPLACE_ROOT, "computer-use");
-const WRAPPER_PATH = join(PLUGIN_ROOT, "scripts", "computer-use-client.mjs");
-
-mkdirSync(dirname(WRAPPER_PATH), { recursive: true });
-writeFileSync(WRAPPER_PATH, "export const fixture = true;\n");
-afterAll(() => rmSync(TEST_ROOT, { recursive: true, force: true }));
 
 interface RecordedRequest {
   method: string;
@@ -49,7 +38,7 @@ function currentPluginList(): PluginListResponse {
     marketplaces: [
       {
         name: "openai-bundled",
-        path: MARKETPLACE_ROOT,
+        path: "/tmp/openai-bundled",
         plugins: [
           {
             id: "computer-use",
@@ -58,7 +47,6 @@ function currentPluginList(): PluginListResponse {
             enabled: true,
             installPolicy: "bundled",
             authPolicy: "none",
-            source: { path: PLUGIN_ROOT },
           },
         ],
       },

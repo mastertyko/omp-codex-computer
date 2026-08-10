@@ -1,4 +1,3 @@
-import { basename, dirname, isAbsolute, relative, sep } from "node:path";
 import { COMPUTER_USE_MCP_TOOL_NAMES } from "./computer-use-tools";
 import type {
   McpServerStatusListResponse,
@@ -27,8 +26,6 @@ export interface ComputerUseServerCapabilities {
 
 export interface ComputerUseCapabilities {
   pluginMatch?: ComputerUsePluginMatch;
-  marketplaceRoot?: string;
-  pluginRoot?: string;
   direct: ComputerUseServerCapabilities;
   nodeRepl: ComputerUseServerCapabilities;
   preferredRoute?: "sky" | "direct";
@@ -49,10 +46,6 @@ export function evaluateComputerUseCapabilities(
   mcp: McpServerStatusListResponse,
 ): ComputerUseCapabilities {
   const pluginMatch = findPlugin(plugins, DEFAULT_PLUGIN_NAME);
-  const marketplaceRoot = getMarketplaceRoot(pluginMatch?.marketplace.path);
-  const pluginRoot = pluginMatch && marketplaceRoot
-    ? getAbsolutePluginRoot(pluginMatch, marketplaceRoot)
-    : undefined;
   const direct = evaluateServer(
     mcp,
     DEFAULT_DIRECT_MCP_SERVER_NAME,
@@ -66,13 +59,9 @@ export function evaluateComputerUseCapabilities(
 
   const capabilities: ComputerUseCapabilities = { direct, nodeRepl };
   if (pluginMatch) capabilities.pluginMatch = pluginMatch;
-  if (marketplaceRoot) capabilities.marketplaceRoot = marketplaceRoot;
-  if (pluginRoot) capabilities.pluginRoot = pluginRoot;
 
   const pluginReady = !!pluginMatch?.plugin.installed && !!pluginMatch.plugin.enabled;
-  const skyComplete = pluginReady
-    && pluginRoot !== undefined
-    && nodeRepl.complete;
+  const skyComplete = pluginReady && nodeRepl.complete;
   if (skyComplete) capabilities.preferredRoute = "sky";
   else if (pluginReady && direct.complete) capabilities.preferredRoute = "direct";
 
@@ -95,35 +84,4 @@ function evaluateServer(
     missingToolNames,
     complete: missingToolNames.length === 0,
   };
-}
-
-function getAbsolutePluginRoot(match: ComputerUsePluginMatch, marketplaceRoot: string): string | undefined {
-  if (!match.plugin.source || typeof match.plugin.source !== "object") return undefined;
-
-  const source = match.plugin.source as Record<string, unknown>;
-  if (typeof source.path !== "string" || !isAbsolute(source.path)) return undefined;
-  return isStrictlyWithin(marketplaceRoot, source.path) ? source.path : undefined;
-}
-
-function getMarketplaceRoot(path: string | null | undefined): string | undefined {
-  if (typeof path !== "string" || !isAbsolute(path)) return undefined;
-  if (basename(path) !== "marketplace.json") return path;
-
-  const metadataDirectory = dirname(path);
-  const metadataDirectoryName = basename(metadataDirectory);
-  if (metadataDirectoryName === ".claude-plugin" || metadataDirectoryName === ".codex-plugin") {
-    return dirname(metadataDirectory);
-  }
-  if (metadataDirectoryName !== "plugins") return undefined;
-
-  const agentsDirectory = dirname(metadataDirectory);
-  return basename(agentsDirectory) === ".agents" ? dirname(agentsDirectory) : undefined;
-}
-
-function isStrictlyWithin(parent: string, child: string): boolean {
-  const relativePath = relative(parent, child);
-  return relativePath !== ""
-    && relativePath !== ".."
-    && !relativePath.startsWith(`..${sep}`)
-    && !isAbsolute(relativePath);
 }
