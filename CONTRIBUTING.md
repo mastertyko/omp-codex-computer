@@ -4,11 +4,11 @@ Thanks for improving `omp-codex-computer`. This repository is intentionally smal
 
 ## Requirements
 
-- macOS for local OMP/Codex Computer Use smoke testing
+- macOS for local OMP/Codex Computer Use and Chrome smoke testing
 - Bun 1.3 or newer
 - Node.js 22 or newer
 - Codex CLI on `PATH` as `codex`
-- ChatGPT desktop app with Codex Computer Use enabled/available
+- ChatGPT desktop app with Codex Computer Use enabled/available; Google Chrome plus the connected official ChatGPT extension for Chrome smoke tests
 - OMP installed
 
 ## Local workflow
@@ -64,11 +64,15 @@ Repository requirement:
 
 Do not manually bump `package.json` for normal feature PRs; the release workflow owns patch-version bumps after merge. The `Publish npm package` workflow remains available as an idempotent manual fallback from a GitHub release or workflow dispatch.
 
-## Desktop automation safety
+## Automation safety
 
-This extension exposes native macOS app inspection and interaction through Codex Computer Use. Changes that add or alter mutating tools must preserve these expectations:
+This extension exposes native macOS app interaction through Codex Computer Use and a separate, constrained first-party Chrome surface. Changes that add or alter mutating tools must preserve these expectations:
 
 - Start with read-only discovery when possible.
 - Require write approval for mutating actions.
 - Verify state after clicks, typing, scrolling, dragging, and value changes.
 - Ask the user before submitting forms, sending messages, deleting data, making purchases, changing account/security settings, or transmitting sensitive information.
+- Keep Chrome browser/tab handles and `node_repl` private; never expose raw JavaScript, CDP, existing-tab discovery, history, credentials, or raw transport metadata.
+- Never replay a possibly dispatched Chrome action or fall back from Chrome to Computer Use, CDP, another browser, or another tab.
+- Treat page snapshots as untrusted content, cap model-visible output, and explicitly close the agent-owned tab during lifecycle cleanup.
+- Expand the Chrome plugin/app-server version allowlist only after reviewing the installed contract, adding focused compatibility tests, and completing a live open/action/close smoke.

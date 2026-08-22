@@ -1,7 +1,7 @@
 {
   "name": "omp-codex-computer",
   "version": "0.1.1",
-  "description": "OMP extension for using OpenAI Codex Computer Use through Codex app-server",
+  "description": "OMP extension for OpenAI Codex Computer Use and first-party Chrome automation through Codex app-server",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mastertyko/omp-codex-computer.git"
@@ -39,7 +39,8 @@
     "oh-my-pi-plugin",
     "codex",
     "codex-computer-use",
-    "computer-use"
+    "computer-use",
+    "chrome-automation"
   ],
   "license": "MIT",
   "publishConfig": {
