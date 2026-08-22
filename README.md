@@ -84,7 +84,7 @@ Sky is preferred when both routes are available. Fallback is allowed only when S
 
 Chrome uses a separate path: `app-server → node_repl/js → bundled Chrome browser client → first-party browser service → official Chrome extension`. The adapter accepts only the explicitly validated Chrome plugin/app-server tuple, a canonical local plugin directory, the matching manifest, and an unambiguous `node_repl/js` tool. It never aliases Chrome to generic Computer Use, CDP, or another browser.
 
-`chrome_open` creates the one agent-owned tab. `chrome_observe` returns a capped semantic page snapshot. `chrome_act` supports HTTPS/HTTP navigation, semantic-locator click/fill/keypress actions, and close. Agent-end cleanup closes any remaining tab before stopping the dedicated app-server child.
+`chrome_open` creates the one agent-owned tab and can optionally load an initial http(s) URL in the same call. `chrome_observe` returns a capped semantic page snapshot and accepts a 1-indexed line offset for paging past the cap. `chrome_act` supports HTTPS/HTTP navigation, back/forward/reload, semantic-locator click/fill/keypress/select/check actions, and close. Agent-end cleanup closes any remaining tab before stopping the dedicated app-server child.
 
 ## Safety
 
@@ -92,7 +92,7 @@ The extension does not automate the desktop or browser directly. It calls Codex 
 
 Desktop tasks should start with read-only discovery such as `computer_use_list_apps`, `computer_use_resolve_app`, or `computer_use_get_app_state`. Sky app listings expose only the model-relevant `id`, `displayName`, and `isRunning` fields while retaining the full structured response internally for target resolution. If an app-state diff lacks the required context, request a complete accessibility tree with `disableDiff: true`. If `get_app_state` returns `Invalid app`, the adapter enriches the error with target-resolution guidance for cases like unbundled local GUI processes launched as raw executables. Mutating tools are registered with write approval, reject clicks without an element index or complete coordinate pair, and are never automatically replayed after a user-stopped Computer Use session.
 
-Chrome remains isolated to one opaque tab for one agent run. Page snapshots are untrusted content and capped at 50 KiB/3,000 lines. The public schema exposes no arbitrary JavaScript, CDP, CSS selectors, coordinates, browser/tab IDs, existing-tab discovery, file URLs, credential-bearing URLs, uploads, downloads, or unrestricted key chords. `chrome_open` and `chrome_act` require write approval; `chrome_observe` is read-only. Failed or interrupted dispatch poisons the Chrome runtime for the rest of that agent run, so a possible side effect is never retried or routed elsewhere.
+Chrome remains isolated to one opaque tab for one agent run. Page snapshots are untrusted content and capped at 50 KiB/3,000 lines per window. The public schema exposes no arbitrary JavaScript, CDP, CSS selectors, coordinates, browser/tab IDs, existing-tab discovery, file URLs, credential-bearing URLs, uploads, downloads, or unrestricted key chords. `chrome_open` and `chrome_act` require write approval; `chrome_observe` is read-only. Locator actions require an unambiguous target before acting — exactly one match, or exactly one visible match among a few duplicates; a miss or a still-ambiguous locator fails without side effects and without ending the Chrome run. Only failures with an uncertain outcome after an action was dispatched — timeouts mid-action, lost or invalid responses, interrupts — poison the Chrome runtime for the rest of that agent run, so a possible side effect is never retried or routed elsewhere.
 
 ## Contributing and security
 
@@ -121,3 +121,11 @@ Verified on 2026-08-22 with OMP v17.3.4, Codex CLI/app-server 0.149.0, bundled C
 - The Chrome compatibility probe reported `ready` for the exact trusted plugin/app-server tuple; it did not bootstrap the browser.
 - A live `ChromeRuntime` opened a blank extension-backed tab, returned an empty snapshot, navigated to `https://example.com/`, clicked `Learn more` with a semantic text locator, returned the IANA snapshot, closed the tab, and completed cleanup.
 - An end-to-end `omp-dev -e .` agent run loaded the extension's real OMP-compatible schemas, used only `chrome_open`/`chrome_act`, reported the `Example Domain` heading, and closed the tab.
+
+Re-verified on 2026-08-23 for the extended Chrome surface, same stack:
+
+- `bun run check` passed with 209 tests across 17 files.
+- A live `ChromeRuntime` opened `https://www.selenium.dev/selenium/web/web-form.html` directly through `chrome_open` with a URL, then exercised select-by-label, checkbox setChecked, fill with multibyte text, navigate, back, forward, reload, offset-paged observe, and close — three consecutive full runs green.
+- A missing locator returned `element_not_found` and a two-match locator returned `ambiguous_locator`; both were side-effect free and the same Chrome run continued and completed cleanup afterwards.
+- A raw bridge probe confirmed strict-mode Playwright semantics upstream and working `nth()`/`isVisible()` primitives for the visible-aware locator resolver.
+- An end-to-end `omp-dev -e . -p` agent run enabled the tools with `/codex-computer enable`, loaded the extended schemas through OMP's real Zod surface, opened `https://example.com/` via `chrome_open` with its `url` parameter, reported the `Example Domain` heading, and closed the tab.

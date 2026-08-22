@@ -64,12 +64,16 @@ export function registerChromeTools(pi: ExtensionAPI, runtime: ChromeRuntime): v
       ) {
         let result: ChromeResult;
         switch (tool.name) {
-          case "chrome_open":
-            result = signal ? await runtime.open(ctx, signal) : await runtime.open(ctx);
+          case "chrome_open": {
+            const openParams = params as { url?: string };
+            result = await runtime.open(ctx, openParams.url, signal);
             break;
-          case "chrome_observe":
-            result = signal ? await runtime.observe(ctx, signal) : await runtime.observe(ctx);
+          }
+          case "chrome_observe": {
+            const observeParams = params as { offset?: number };
+            result = await runtime.observe(ctx, observeParams.offset, signal);
             break;
+          }
           case "chrome_act": {
             const actParams = params as { action: ChromeAction };
             result = signal ? await runtime.act(ctx, actParams.action, signal) : await runtime.act(ctx, actParams.action);
@@ -86,28 +90,34 @@ export function registerChromeTools(pi: ExtensionAPI, runtime: ChromeRuntime): v
 function createParameterSchemas(pi: ExtensionAPI): Record<ChromeToolName, unknown> {
   const z = pi.zod;
   const strictObject = <T extends Record<string, unknown>>(shape: T) => z.object(shape).strict();
-  const nonEmpty = (description: string) => z.string().min(1).describe(description);
+  const semanticText = (description: string) => z.string()
+    .min(1)
+    .refine((value: string) => Buffer.byteLength(value, "utf8") <= 1024, "Use at most 1024 UTF-8 bytes.")
+    .describe(description);
   const locator = z.union([
     strictObject({
       kind: z.literal("role"),
-      role: nonEmpty("The semantic ARIA role."),
-      name: z.string().min(1).optional().describe("The accessible name, when needed."),
+      role: semanticText("The semantic ARIA role."),
+      name: z.string().min(1)
+        .refine((value: string) => Buffer.byteLength(value, "utf8") <= 1024, "Use at most 1024 UTF-8 bytes.")
+        .optional()
+        .describe("The accessible name, when needed."),
     }),
     strictObject({
       kind: z.literal("text"),
-      text: nonEmpty("The visible text to match."),
+      text: semanticText("The visible text to match."),
     }),
     strictObject({
       kind: z.literal("label"),
-      label: nonEmpty("The form label to match."),
+      label: semanticText("The form label to match."),
     }),
     strictObject({
       kind: z.literal("placeholder"),
-      placeholder: nonEmpty("The placeholder to match."),
+      placeholder: semanticText("The placeholder to match."),
     }),
     strictObject({
       kind: z.literal("test_id"),
-      testId: nonEmpty("The test id to match."),
+      testId: semanticText("The test id to match."),
     }),
   ]).describe("A semantic page target; selectors, regexes, coordinates, and indexes are not supported.");
 
@@ -115,6 +125,8 @@ function createParameterSchemas(pi: ExtensionAPI): Record<ChromeToolName, unknow
     .min(1)
     .max(2048)
     .refine((value: string) => {
+      if (Buffer.byteLength(value, "utf8") > 2048) return false;
+      if (/[\u0000-\u0020\u007f]/u.test(value)) return false;
       try {
         const parsed = new URL(value);
         return (parsed.protocol === "http:" || parsed.protocol === "https:")
@@ -123,7 +135,7 @@ function createParameterSchemas(pi: ExtensionAPI): Record<ChromeToolName, unknow
       } catch {
         return false;
       }
-    }, "Use an absolute http(s) URL without credentials.");
+    }, "Use an absolute http(s) URL without credentials or whitespace.");
   const key = z.enum([
     "Enter",
     "Tab",
@@ -143,15 +155,38 @@ function createParameterSchemas(pi: ExtensionAPI): Record<ChromeToolName, unknow
   ]);
   const action = z.union([
     strictObject({ kind: z.literal("navigate"), url }),
+    strictObject({ kind: z.literal("back") }),
+    strictObject({ kind: z.literal("forward") }),
+    strictObject({ kind: z.literal("reload") }),
     strictObject({ kind: z.literal("click"), target: locator }),
-    strictObject({ kind: z.literal("fill"), target: locator, value: z.string().max(32768) }),
+    strictObject({
+      kind: z.literal("fill"),
+      target: locator,
+      value: z.string().max(32768)
+        .refine((value: string) => Buffer.byteLength(value, "utf8") <= 32768, "Use at most 32768 UTF-8 bytes."),
+    }),
     strictObject({ kind: z.literal("press"), target: locator, key }),
+    strictObject({
+      kind: z.literal("select"),
+      target: locator,
+      option: semanticText("The exact visible label of the option to select."),
+    }),
+    strictObject({
+      kind: z.literal("check"),
+      target: locator,
+      checked: z.boolean().describe("The desired checked state."),
+    }),
     strictObject({ kind: z.literal("close") }),
   ]).describe("One finite Chrome action; no raw JavaScript, CDP, selectors, or arbitrary keys.");
 
   return {
-    chrome_open: strictObject({}),
-    chrome_observe: strictObject({}),
+    chrome_open: strictObject({
+      url: url.optional().describe("Optional http(s) URL to load immediately in the new tab; the result is then the page snapshot."),
+    }),
+    chrome_observe: strictObject({
+      offset: z.number().int().min(1).max(1_000_000).optional()
+        .describe("1-indexed snapshot line to start from, for paging past a truncated snapshot."),
+    }),
     chrome_act: strictObject({ action }),
   };
 }

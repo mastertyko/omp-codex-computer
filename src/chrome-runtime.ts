@@ -6,6 +6,7 @@ import {
 } from "./app-server-client";
 import {
   ChromeTransport,
+  ChromeTransportError,
   type ChromeAction,
   type ChromeOperation,
   type ChromeResult,
@@ -118,12 +119,12 @@ export class ChromeRuntime {
     return this.queue.enqueue(() => this.finishAgent());
   }
 
-  open(ctx: ExtensionContext, signal?: AbortSignal): Promise<ChromeResult> {
-    return this.run(ctx, { kind: "open" }, signal);
+  open(ctx: ExtensionContext, url?: string, signal?: AbortSignal): Promise<ChromeResult> {
+    return this.run(ctx, url === undefined ? { kind: "open" } : { kind: "open", url }, signal);
   }
 
-  observe(ctx: ExtensionContext, signal?: AbortSignal): Promise<ChromeResult> {
-    return this.run(ctx, { kind: "observe" }, signal);
+  observe(ctx: ExtensionContext, offset?: number, signal?: AbortSignal): Promise<ChromeResult> {
+    return this.run(ctx, offset === undefined ? { kind: "observe" } : { kind: "observe", offset }, signal);
   }
 
   act(ctx: ExtensionContext, action: ChromeAction, signal?: AbortSignal): Promise<ChromeResult> {
@@ -160,7 +161,10 @@ export class ChromeRuntime {
         if (!this.client.isRunning()) throw new Error("Chrome app-server is unavailable");
         return result;
       } catch (error) {
-        await this.poison(agent);
+        // Benign transport errors are proven side-effect free; anything else
+        // (unknown errors, uncertain dispatch outcomes) poisons the run.
+        const benign = error instanceof ChromeTransportError && !error.poisons;
+        if (!benign) await this.poison(agent);
         if (signal?.aborted) throw createAbortError();
         throw error;
       }

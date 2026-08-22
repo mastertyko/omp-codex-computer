@@ -3,6 +3,7 @@ import type { AppServerClient } from "../src/app-server-client";
 import {
   CHROME_PRESS_KEYS,
   ChromeTransport,
+  ChromeTransportError,
 } from "../src/chrome-transport";
 import type { InitializeResponse } from "../src/protocol";
 import type { CodexThreadInfo, CodexThreadManager } from "../src/thread-manager";
@@ -243,6 +244,149 @@ describe("ChromeTransport", () => {
     await expect(transport.execute("/work", identity, { kind: "open" }))
       .rejects.toMatchObject({ code: "request_failed", message: "Chrome transport request failed" });
     expect(client.calls.filter(({ method }) => method === "mcpServer/tool/call")).toHaveLength(1);
+  });
+
+  it("accepts the extended finite action set and forwards it in the payload", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    const target = { kind: "label", label: "Country" } as const;
+    const actions = [
+      { kind: "back" },
+      { kind: "forward" },
+      { kind: "reload" },
+      { kind: "select", target, option: "Sweden" },
+      { kind: "check", target, checked: true },
+    ] as const;
+
+    for (const action of actions) {
+      client.responses.push(success({ kind: "snapshot", text: "after", truncated: false, byteLength: 5 }));
+      await expect(transport.execute("/work", identity, { kind: "act", action } as never))
+        .resolves.toMatchObject({ kind: "snapshot" });
+    }
+    const payloads = client.calls
+      .filter(({ method }) => method === "mcpServer/tool/call")
+      .map(getProgram)
+      .map(decodePayload) as Array<{ operation: { kind: string; action: { kind: string } } }>;
+    expect(payloads.map(({ operation }) => operation.action.kind)).toEqual([
+      "back", "forward", "reload", "select", "check",
+    ]);
+  });
+
+  it("rejects malformed extended actions before dispatch", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    const target = { kind: "label", label: "Country" } as const;
+    const actions: unknown[] = [
+      { kind: "back", url: "https://example.com/" },
+      { kind: "select", target },
+      { kind: "select", target, option: "" },
+      { kind: "select", target, option: "x".repeat(2048) },
+      { kind: "check", target, checked: "yes" },
+      { kind: "check", target },
+    ];
+    for (const action of actions) {
+      await expect(transport.execute("/work", identity, { kind: "act", action } as never))
+        .rejects.toMatchObject({ code: "invalid_request" });
+    }
+    expect(client.calls.filter(({ method }) => method === "mcpServer/tool/call")).toHaveLength(0);
+  });
+
+  it("opens with an optional URL and expects a snapshot result", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    client.responses.push(success({ kind: "snapshot", text: "Example Domain", truncated: false, byteLength: 14 }));
+
+    await expect(transport.execute("/work", identity, { kind: "open", url: "https://example.com/" }))
+      .resolves.toMatchObject({ kind: "snapshot", text: "Example Domain" });
+    expect(decodePayload(getProgram(getToolCall(client)))).toEqual({
+      identity,
+      operation: { kind: "open", url: "https://example.com/" },
+    });
+
+    for (const url of ["javascript:alert(1)", "file:///etc/passwd", "https://user:pass@example.com/"]) {
+      await expect(transport.execute("/work", identity, { kind: "open", url }))
+        .rejects.toMatchObject({ code: "invalid_request" });
+    }
+
+    client.responses.push(success({ kind: "opened" }));
+    await expect(transport.execute("/work", identity, { kind: "open", url: "https://example.com/" }))
+      .rejects.toMatchObject({ code: "protocol_failed" });
+  });
+
+  it("pages observe snapshots by line offset and bounds the offset", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    client.responses.push(success({ kind: "snapshot", text: "tail", truncated: false, byteLength: 4 }));
+
+    await expect(transport.execute("/work", identity, { kind: "observe", offset: 3000 }))
+      .resolves.toMatchObject({ kind: "snapshot", text: "tail" });
+    expect(decodePayload(getProgram(getToolCall(client)))).toEqual({
+      identity,
+      operation: { kind: "observe", offset: 3000 },
+    });
+
+    for (const offset of [0, -1, 1.5, Number.NaN, 1_000_001]) {
+      await expect(transport.execute("/work", identity, { kind: "observe", offset } as never))
+        .rejects.toMatchObject({ code: "invalid_request" });
+    }
+  });
+
+  it("maps the new program error codes onto benign transport errors", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    for (const code of ["element_not_found", "ambiguous_locator", "navigation_failed"] as const) {
+      client.responses.push(failure(code));
+      await expect(transport.execute("/work", identity, { kind: "observe" }))
+        .rejects.toMatchObject({ code, poisons: false });
+    }
+  });
+
+  it("classifies poisoning versus benign codes on the error type", () => {
+    const benign = [
+      "unavailable", "invalid_request", "tab_already_open", "tab_not_open",
+      "element_not_found", "ambiguous_locator", "navigation_failed",
+      "snapshot_failed", "snapshot_failed_after_action", "close_failed",
+    ] as const;
+    const poisoning = ["not_prepared", "protocol_failed", "operation_failed", "interrupted", "request_failed"] as const;
+    for (const code of benign) expect(new ChromeTransportError(code).poisons).toBe(false);
+    for (const code of poisoning) expect(new ChromeTransportError(code).poisons).toBe(true);
+  });
+
+  it("generates a visible-aware single-match precheck with bounded action timeouts", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    client.responses.push(success({ kind: "snapshot", text: "after", truncated: false, byteLength: 5 }));
+    await transport.execute("/work", identity, {
+      kind: "act", action: { kind: "click", target: { kind: "text", text: "Continue" } },
+    });
+
+    const program = getProgram(getToolCall(client));
+    expect(program).toContain('waitFor({ state: "attached", timeoutMs: locatorWaitTimeoutMs })');
+    expect(program).toContain("locator.count()");
+    expect(program).toContain('fail("ambiguous_locator")');
+    expect(program).toContain('fail("element_not_found")');
+    expect(program).toContain("locator.nth(index).isVisible()");
+    expect(program).toContain("matches > maxVisibilityProbes");
+    expect(program).toContain("snapshotSecondAttemptDelayMs");
+    expect(program).toContain("locator.nth(visibleIndex)");
+    expect(program).toContain("resolved.click({ timeoutMs: actionTimeoutMs })");
+    expect(program).toContain('selectOption({ label: action.option }');
+    expect(program).toContain("setChecked(action.checked");
+    expect(program).toContain("tab.back()");
+    expect(program).toContain("tab.reload()");
+  });
+
+  it("retries discovery after a failed prepare instead of pinning the rejection", async () => {
+    evaluateChromeCapabilities.mockResolvedValueOnce({
+      status: "unavailable", reason: "plugin_disabled", message: "Chrome is unavailable",
+    });
+    const { client, transport } = createTransport();
+    await expect(transport.prepare("/work", initialize)).rejects.toMatchObject({ code: "unavailable" });
+
+    await transport.prepare("/work", initialize);
+    client.responses.push(success({ kind: "opened" }));
+    await expect(transport.execute("/work", identity, { kind: "open" })).resolves.toEqual({ kind: "opened" });
+    expect(client.calls.filter(({ method }) => method === "plugin/list")).toHaveLength(2);
   });
 
   it("resets preparation and fails closed when capability discovery is unavailable", async () => {
