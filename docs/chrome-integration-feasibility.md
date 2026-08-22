@@ -12,11 +12,11 @@ The public surface owns one new blank tab per OMP agent run. It does not list, s
 
 | Tool | Approval | Contract |
 |---|---|---|
-| `chrome_open` | write | Opens exactly one new agent-owned blank Chrome tab. A second open in the same run is rejected. |
-| `chrome_observe` | read | Returns a semantic DOM snapshot, truncated to 50 KiB and 3,000 lines. |
-| `chrome_act` | write | Allows only HTTP(S) navigation, semantic click/fill/keypress, and close. Returns a snapshot after a successful action. |
+| `chrome_open` | write | Opens exactly one new agent-owned Chrome tab, optionally loading an initial http(s) URL in the same call (the result is then the post-navigation snapshot). A second open in the same run is rejected. |
+| `chrome_observe` | read | Returns a semantic DOM snapshot, truncated to 50 KiB and 3,000 lines. An optional 1-indexed `offset` pages past the cap by starting the window at a later snapshot line. |
+| `chrome_act` | write | Allows only HTTP(S) navigation, back/forward/reload, semantic click/fill/keypress/select/check, and close. Returns a snapshot after a successful action. |
 
-Allowed locators are role/name, text, label, placeholder, and test id. Allowed keys are a fixed navigation/form list. The public schemas do not expose raw JavaScript, CDP, CSS selectors, coordinates, browser/tab ids, tab lists, history, file URLs, credential-bearing URLs, uploads, downloads, or unrestricted key chords.
+Allowed locators are role/name, text, label, placeholder, and test id. Allowed keys are a fixed navigation/form list. `select` targets a native `<select>` by the exact visible option label; `check` sets a checkbox or switch state idempotently. Before any locator action the generated program waits briefly for the target and then requires an unambiguous match: exactly one match, or — when a locator resolves to a handful of duplicates, as with hidden mobile-navigation copies — exactly one visible match, which is then acted on deterministically. Zero matches fail as `element_not_found` and several as `ambiguous_locator`, both without dispatching the action. The bundled bridge is strict-mode Playwright (live-verified: a two-match action throws `strict mode violation` upstream), so this resolver only ever narrows behavior, never acts on an arbitrary first match. The public schemas do not expose raw JavaScript, CDP, CSS selectors, coordinates, browser/tab ids, tab lists, history, file URLs, credential-bearing URLs, uploads, downloads, or unrestricted key chords.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ node_repl/js → bundled browser-client.mjs
 
 The Chrome runtime is deliberately separate from `ComputerUseRuntime`. This prevents a browser disconnect, unsafe abort, or lifecycle reset from affecting the native app tools. It creates a dedicated app-server child only on the first Chrome call and stops it on `agent_end`, `session_shutdown`, disable, or restart.
 
-`agent_end` first sends an explicit cleanup operation with the same opaque session/turn identity. Cleanup removes the session, closes any remaining tab, and then stops the child process. A failed or aborted dispatch poisons the Chrome runtime for the rest of the agent run; the action is never replayed and never routed to Computer Use, CDP, or another browser.
+`agent_end` first sends an explicit cleanup operation with the same opaque session/turn identity. Cleanup closes any remaining tab, removes the session, and then stops the child process. Failures are split into two classes. Benign failures are proven side-effect free — validation rejections, tab-state errors (`tab_not_open`, `tab_already_open`), locator prechecks (`element_not_found`, `ambiguous_locator`), failed GET navigations (`navigation_failed`), bootstrap unavailability, failed pure reads (`snapshot_failed`, `snapshot_failed_after_action`), and a failed close of the agent-owned tab (`close_failed`, which retains the tab handle so close can be retried) — and leave the Chrome run usable so the agent can refine and continue. Every other failure — an abort, timeout, lost response, or invalid envelope once an action may have been dispatched — poisons the Chrome runtime for the rest of the agent run; the action is never replayed and never routed to Computer Use, CDP, or another browser.
 
 ## Capability and version gate
 
@@ -64,7 +64,7 @@ An unknown version, ambiguous marketplace/plugin/server, non-local source, missi
 2. **OMP approval sits at the public tool boundary.** Open and all actions are write; observe is read. The bundled skill requires separate user confirmation immediately before messaging, form submission, purchases, account/security changes, or sensitive transfers.
 3. **No model-exposed `node_repl`.** The model only selects typed operations. The transport generates the program itself, imports only the discovered canonical client file, and re-validates the payload inside the repl process.
 4. **Strict response envelope.** Only a versioned text envelope is accepted. Results are validated against exact keys; raw metadata, internal errors, browser/tab objects, and discovered paths are not returned.
-5. **No replay.** An abort, timeout, lost response, invalid envelope, or snapshot failure after an action invalidates the entire Chrome run.
+5. **No replay of uncertain outcomes.** An abort, timeout, lost response, or invalid envelope after an action was dispatched invalidates the entire Chrome run. Benign, side-effect-free failures (locator prechecks, tab-state errors, rejected validation, failed GET navigation, failed reads, failed close of the agent tab) do not invalidate the run, because no action was performed or the outcome is deterministic. The only in-program second attempt is re-reading `domSnapshot`, a pure read; dispatched actions are never replayed at any layer.
 6. **Page content is untrusted.** The snapshot may contain page text and link URLs and must be treated as data, never instructions. It is truncated before the model result and is not logged by the Chrome modules.
 
 ## Live verification 2026-08-22
@@ -80,10 +80,23 @@ The following was observed locally against the installed first-party stack:
 
 This proves real browser RPC, Chrome extension connectivity, navigation, locator clicks, snapshots, and explicit cleanup for the constrained surface. It does not prove full `@Chrome` parity or flows that require elicitation.
 
+## Live verification 2026-08-23 (extended surface)
+
+Observed locally against the same stack, on `https://www.selenium.dev/selenium/web/web-form.html`:
+
+1. `chrome_open` with a URL opened the tab and returned the post-navigation snapshot in one dispatch.
+2. A locator with no match failed as `element_not_found` and a two-visible-match `role: checkbox` locator failed as `ambiguous_locator`; both dispatched no action and the same Chrome run continued.
+3. A raw bridge probe confirmed the bundled client is strict-mode Playwright (`strict mode violation … resolved to 2 elements`) and that `nth()`/`isVisible()` work, grounding the visible-aware single-match resolver; the exactly-one-visible-of-N branch is unit-verified against the generated program.
+4. `select` by exact visible option label, `check` on a labeled checkbox, and `fill` with multibyte text (`åäö`) all completed and returned post-action snapshots.
+5. `navigate`, `back`, `forward`, and `reload` all worked; `back` restored the form page with its filled value and `forward` returned to the navigated page.
+6. `chrome_observe` with `offset: 5` returned the snapshot window starting at line 5.
+7. A sporadic bridge failure (~7 s after bootstrap, roughly two of three runs) originally surfaced on pure reads; with benign classification and the single snapshot second attempt, three consecutive full smoke runs completed with no poisoned step.
+8. Close and agent cleanup completed with no tab left open.
+
 ## Remaining limitations
 
 - No listing or takeover of existing tabs.
-- No history, screenshots, upload/download, browser auth, or connector APIs.
+- No history enumeration, screenshots, upload/download, browser auth, or connector APIs.
 - No approval broker for first-party browser elicitations; such flows are denied.
 - Only the strictly validated version combination is supported. Every Codex/plugin update requires a new contract review and live probe before the allowlist is expanded.
 - Status is a compatibility check, not a connectivity check.

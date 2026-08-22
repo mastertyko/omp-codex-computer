@@ -40,9 +40,14 @@ export type ChromePressKey = (typeof CHROME_PRESS_KEYS)[number];
 
 export type ChromeAction =
   | { kind: "navigate"; url: string }
+  | { kind: "back" }
+  | { kind: "forward" }
+  | { kind: "reload" }
   | { kind: "click"; target: ChromeLocator }
   | { kind: "fill"; target: ChromeLocator; value: string }
   | { kind: "press"; target: ChromeLocator; key: ChromePressKey }
+  | { kind: "select"; target: ChromeLocator; option: string }
+  | { kind: "check"; target: ChromeLocator; checked: boolean }
   | { kind: "close" };
 
 export interface ChromeTurnIdentity {
@@ -51,8 +56,8 @@ export interface ChromeTurnIdentity {
 }
 
 export type ChromeOperation =
-  | { kind: "open" }
-  | { kind: "observe" }
+  | { kind: "open"; url?: string }
+  | { kind: "observe"; offset?: number }
   | { kind: "act"; action: ChromeAction }
   | { kind: "cleanup" };
 
@@ -68,8 +73,13 @@ export type ChromeTransportErrorCode =
   | "protocol_failed"
   | "tab_already_open"
   | "tab_not_open"
+  | "element_not_found"
+  | "ambiguous_locator"
+  | "navigation_failed"
   | "operation_failed"
+  | "snapshot_failed"
   | "snapshot_failed_after_action"
+  | "close_failed"
   | "interrupted"
   | "request_failed";
 
@@ -81,6 +91,11 @@ const MAX_LOCATOR_BYTES = 1024;
 const MAX_FILL_BYTES = 32 * 1024;
 const MAX_SNAPSHOT_BYTES = 50 * 1024;
 const MAX_SNAPSHOT_LINES = 3000;
+const MAX_OBSERVE_OFFSET_LINES = 1_000_000;
+const LOCATOR_WAIT_TIMEOUT_MS = 10_000;
+const ACTION_TIMEOUT_MS = 30_000;
+const MAX_VISIBILITY_PROBES = 8;
+const SNAPSHOT_SECOND_ATTEMPT_DELAY_MS = 500;
 const SNAPSHOT_TRUNCATION_MARKER = "[Output truncated]";
 const PRESS_KEY_LOOKUP = new Set<string>(CHROME_PRESS_KEYS);
 
@@ -91,10 +106,35 @@ const ERROR_MESSAGES: Readonly<Record<ChromeTransportErrorCode, string>> = Objec
   protocol_failed: "Chrome transport returned an invalid response",
   tab_already_open: "Chrome already has an open agent tab",
   tab_not_open: "Chrome has no open agent tab",
+  element_not_found: "Chrome found no element matching the locator; observe the page and refine the target",
+  ambiguous_locator: "Chrome locator matched multiple elements; use a more specific target",
+  navigation_failed: "Chrome could not complete the navigation",
   operation_failed: "Chrome operation failed",
+  snapshot_failed: "Chrome could not capture the page snapshot; observe again",
   snapshot_failed_after_action: "Chrome action completed but its snapshot is unavailable",
+  close_failed: "Chrome could not close the agent tab; the close action may be retried",
   interrupted: "Chrome operation was interrupted",
   request_failed: "Chrome transport request failed",
+});
+
+// Codes proven side-effect free: the program either never dispatched an action
+// or completed it deterministically. Everything else invalidates the Chrome run.
+const ERROR_POISONS: Readonly<Record<ChromeTransportErrorCode, boolean>> = Object.freeze({
+  not_prepared: true,
+  unavailable: false,
+  invalid_request: false,
+  protocol_failed: true,
+  tab_already_open: false,
+  tab_not_open: false,
+  element_not_found: false,
+  ambiguous_locator: false,
+  navigation_failed: false,
+  operation_failed: true,
+  snapshot_failed: false,
+  snapshot_failed_after_action: false,
+  close_failed: false,
+  interrupted: true,
+  request_failed: true,
 });
 
 interface ReadyChromeCapabilities {
@@ -126,16 +166,24 @@ type ProgramErrorCode =
   | "protocol_failed"
   | "tab_already_open"
   | "tab_not_open"
+  | "element_not_found"
+  | "ambiguous_locator"
+  | "navigation_failed"
   | "operation_failed"
-  | "snapshot_failed_after_action";
+  | "snapshot_failed"
+  | "snapshot_failed_after_action"
+  | "close_failed";
 
 export class ChromeTransportError extends Error {
+  readonly poisons: boolean;
+
   constructor(
     readonly code: ChromeTransportErrorCode,
     message = ERROR_MESSAGES[code],
   ) {
     super(message);
     this.name = code === "interrupted" ? "AbortError" : "ChromeTransportError";
+    this.poisons = ERROR_POISONS[code];
   }
 }
 
@@ -167,8 +215,19 @@ export class ChromeTransport {
     assertNonEmptyString(cwd, "cwd", MAX_IDENTITY_BYTES * 8);
     throwIfAborted(signal);
     this.preparedCwd = cwd;
-    this.preparation = this.discover(cwd, initialize, signal);
-    await this.preparation;
+    const preparation = this.discover(cwd, initialize, signal);
+    this.preparation = preparation;
+    try {
+      await preparation;
+    } catch (error) {
+      // A failed discovery must not pin the transport to a rejected promise;
+      // benign unavailability may resolve later in the same agent run.
+      if (this.preparation === preparation) {
+        this.preparation = undefined;
+        this.preparedCwd = undefined;
+      }
+      throw error;
+    }
   }
 
   async execute(
@@ -264,6 +323,11 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
   const maxFillBytesLiteral = JSON.stringify(MAX_FILL_BYTES);
   const maxSnapshotBytesLiteral = JSON.stringify(MAX_SNAPSHOT_BYTES);
   const maxSnapshotLinesLiteral = JSON.stringify(MAX_SNAPSHOT_LINES);
+  const maxObserveOffsetLiteral = JSON.stringify(MAX_OBSERVE_OFFSET_LINES);
+  const locatorWaitTimeoutLiteral = JSON.stringify(LOCATOR_WAIT_TIMEOUT_MS);
+  const actionTimeoutLiteral = JSON.stringify(ACTION_TIMEOUT_MS);
+  const visibilityProbesLiteral = JSON.stringify(MAX_VISIBILITY_PROBES);
+  const snapshotSecondAttemptDelayLiteral = JSON.stringify(SNAPSHOT_SECOND_ATTEMPT_DELAY_MS);
   const truncationMarkerLiteral = JSON.stringify(SNAPSHOT_TRUNCATION_MARKER);
 
   return `await (async () => {
@@ -276,6 +340,11 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
   const maxFillBytes = ${maxFillBytesLiteral};
   const maxSnapshotBytes = ${maxSnapshotBytesLiteral};
   const maxSnapshotLines = ${maxSnapshotLinesLiteral};
+  const maxObserveOffset = ${maxObserveOffsetLiteral};
+  const locatorWaitTimeoutMs = ${locatorWaitTimeoutLiteral};
+  const actionTimeoutMs = ${actionTimeoutLiteral};
+  const maxVisibilityProbes = ${visibilityProbesLiteral};
+  const snapshotSecondAttemptDelayMs = ${snapshotSecondAttemptDelayLiteral};
   const truncationMarker = ${truncationMarkerLiteral};
   let phase = "validate";
 
@@ -348,6 +417,10 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
     switch (action.kind) {
       case "navigate":
         return hasExactKeys(action, ["kind", "url"]) && validUrl(action.url);
+      case "back":
+      case "forward":
+      case "reload":
+        return hasExactKeys(action, ["kind"]);
       case "click":
         return hasExactKeys(action, ["kind", "target"]) && validTarget(action.target);
       case "fill":
@@ -359,6 +432,14 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
           && validTarget(action.target)
           && typeof action.key === "string"
           && pressKeys.has(action.key);
+      case "select":
+        return hasExactKeys(action, ["kind", "target", "option"])
+          && validTarget(action.target)
+          && validText(action.option, maxLocatorBytes);
+      case "check":
+        return hasExactKeys(action, ["kind", "target", "checked"])
+          && validTarget(action.target)
+          && typeof action.checked === "boolean";
       case "close":
         return hasExactKeys(action, ["kind"]);
       default:
@@ -369,7 +450,14 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
     if (!isRecord(operation) || typeof operation.kind !== "string") return false;
     switch (operation.kind) {
       case "open":
+        return hasExactKeys(operation, ["kind"], ["url"])
+          && (operation.url === undefined || validUrl(operation.url));
       case "observe":
+        return hasExactKeys(operation, ["kind"], ["offset"])
+          && (operation.offset === undefined
+            || (Number.isSafeInteger(operation.offset)
+              && operation.offset >= 1
+              && operation.offset <= maxObserveOffset));
       case "cleanup":
         return hasExactKeys(operation, ["kind"]);
       case "act":
@@ -427,6 +515,43 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
         fail("protocol_failed");
     }
   };
+  const resolveSingleMatch = async (locator) => {
+    phase = "locate";
+    let attached = true;
+    try {
+      await locator.first().waitFor({ state: "attached", timeoutMs: locatorWaitTimeoutMs });
+    } catch {
+      attached = false;
+    }
+    if (!attached) fail("element_not_found");
+    const matches = await locator.count();
+    if (matches === 0) fail("element_not_found");
+    if (matches === 1) return locator;
+    if (matches > maxVisibilityProbes) fail("ambiguous_locator");
+    let visibleIndex = -1;
+    let visibleCount = 0;
+    for (let index = 0; index < matches; index += 1) {
+      if (await locator.nth(index).isVisible()) {
+        visibleCount += 1;
+        visibleIndex = index;
+        if (visibleCount > 1) fail("ambiguous_locator");
+      }
+    }
+    if (visibleCount !== 1) fail("ambiguous_locator");
+    return locator.nth(visibleIndex);
+  };
+  const takeSnapshot = async (playwright) => {
+    let text;
+    try {
+      text = await playwright.domSnapshot();
+    } catch {
+      // domSnapshot is a pure read; one bounded second attempt never repeats an action.
+      await new Promise((resolve) => setTimeout(resolve, snapshotSecondAttemptDelayMs));
+      text = await playwright.domSnapshot();
+    }
+    if (typeof text !== "string") fail("protocol_failed");
+    return text;
+  };
 
   try {
     const payload = JSON.parse(Buffer.from(${payloadLiteral}, "base64").toString("utf8"));
@@ -460,13 +585,12 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
 
     if (operation.kind === "cleanup") {
       const session = registry.sessions.get(sessionKey);
-      registry.sessions.delete(sessionKey);
       if (session && session.tab !== null) {
-        const tab = session.tab;
-        session.tab = null;
         phase = "close";
-        await tab.close();
+        await session.tab.close();
+        session.tab = null;
       }
+      registry.sessions.delete(sessionKey);
       writeEnvelope({ ok: true, result: { kind: "closed" } });
       return;
     }
@@ -492,7 +616,15 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
       if (session.tab !== null) fail("tab_already_open");
       phase = "open";
       session.tab = await session.browser.tabs.new();
-      writeEnvelope({ ok: true, result: { kind: "opened" } });
+      if (operation.url === undefined) {
+        writeEnvelope({ ok: true, result: { kind: "opened" } });
+        return;
+      }
+      phase = "navigate";
+      await session.tab.goto(operation.url);
+      phase = "post_action_snapshot";
+      const opened = await takeSnapshot(session.tab.playwright);
+      writeEnvelope({ ok: true, result: capSnapshot(opened) });
       return;
     }
 
@@ -501,42 +633,55 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
 
     if (operation.kind === "observe") {
       phase = "snapshot";
-      const text = await tab.playwright.domSnapshot();
-      if (typeof text !== "string") fail("protocol_failed");
+      let text = await takeSnapshot(tab.playwright);
+      if (operation.offset !== undefined && operation.offset > 1) {
+        text = text.split("\\n").slice(operation.offset - 1).join("\\n");
+      }
       writeEnvelope({ ok: true, result: capSnapshot(text) });
       return;
     }
 
     const action = operation.action;
     if (action.kind === "close") {
-      session.tab = null;
       phase = "close";
       await tab.close();
+      session.tab = null;
       writeEnvelope({ ok: true, result: { kind: "closed" } });
       return;
     }
 
-    phase = "action";
-    switch (action.kind) {
-      case "navigate":
-        await tab.goto(action.url);
-        break;
-      case "click":
-        await createLocator(tab.playwright, action.target).click({});
-        break;
-      case "fill":
-        await createLocator(tab.playwright, action.target).fill(action.value, {});
-        break;
-      case "press":
-        await createLocator(tab.playwright, action.target).press(action.key, {});
-        break;
-      default:
-        fail("protocol_failed");
+    if (action.kind === "navigate" || action.kind === "back" || action.kind === "forward" || action.kind === "reload") {
+      phase = "navigate";
+      if (action.kind === "navigate") await tab.goto(action.url);
+      else if (action.kind === "back") await tab.back();
+      else if (action.kind === "forward") await tab.forward();
+      else await tab.reload();
+    } else {
+      const resolved = await resolveSingleMatch(createLocator(tab.playwright, action.target));
+      phase = "action";
+      switch (action.kind) {
+        case "click":
+          await resolved.click({ timeoutMs: actionTimeoutMs });
+          break;
+        case "fill":
+          await resolved.fill(action.value, { timeoutMs: actionTimeoutMs });
+          break;
+        case "press":
+          await resolved.press(action.key, { timeoutMs: actionTimeoutMs });
+          break;
+        case "select":
+          await resolved.selectOption({ label: action.option }, { timeoutMs: actionTimeoutMs });
+          break;
+        case "check":
+          await resolved.setChecked(action.checked, { timeoutMs: actionTimeoutMs });
+          break;
+        default:
+          fail("protocol_failed");
+      }
     }
 
     phase = "post_action_snapshot";
-    const text = await tab.playwright.domSnapshot();
-    if (typeof text !== "string") fail("protocol_failed");
+    const text = await takeSnapshot(tab.playwright);
     writeEnvelope({ ok: true, result: capSnapshot(text) });
   } catch (error) {
     const expectedCode = error !== null && typeof error === "object"
@@ -546,9 +691,15 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
       ? expectedCode
       : phase === "setup"
         ? "unavailable"
-        : phase === "post_action_snapshot"
-          ? "snapshot_failed_after_action"
-          : "operation_failed";
+        : phase === "navigate"
+          ? "navigation_failed"
+          : phase === "snapshot"
+            ? "snapshot_failed"
+            : phase === "close"
+              ? "close_failed"
+              : phase === "post_action_snapshot"
+                ? "snapshot_failed_after_action"
+                : "operation_failed";
     writeEnvelope({ ok: false, error: code });
   }
 })();`;
@@ -628,7 +779,7 @@ function readChromeEnvelope(
 }
 
 function expectedResultKind(operation: ChromeOperation): ChromeResult["kind"] {
-  if (operation.kind === "open") return "opened";
+  if (operation.kind === "open") return operation.url === undefined ? "opened" : "snapshot";
   if (operation.kind === "cleanup") return "closed";
   if (operation.kind === "act" && operation.action.kind === "close") return "closed";
   return "snapshot";
@@ -692,7 +843,13 @@ function validateOperation(operation: unknown): asserts operation is ChromeOpera
 
   switch (operation.kind) {
     case "open":
+      assertExactObject(operation, ["kind"], "operation", "invalid_request", ["url"]);
+      if (operation.url !== undefined) assertSafeUrl(operation.url);
+      return;
     case "observe":
+      assertExactObject(operation, ["kind"], "operation", "invalid_request", ["offset"]);
+      if (operation.offset !== undefined) assertObserveOffset(operation.offset);
+      return;
     case "cleanup":
       assertExactObject(operation, ["kind"], "operation");
       return;
@@ -715,6 +872,11 @@ function validateAction(action: unknown): asserts action is ChromeAction {
       assertExactObject(action, ["kind", "url"], "action");
       assertSafeUrl(action.url);
       return;
+    case "back":
+    case "forward":
+    case "reload":
+      assertExactObject(action, ["kind"], "action");
+      return;
     case "click":
       assertExactObject(action, ["kind", "target"], "action");
       validateLocator(action.target);
@@ -728,6 +890,18 @@ function validateAction(action: unknown): asserts action is ChromeAction {
       assertExactObject(action, ["kind", "target", "key"], "action");
       validateLocator(action.target);
       if (typeof action.key !== "string" || !PRESS_KEY_LOOKUP.has(action.key)) {
+        throw new ChromeTransportError("invalid_request");
+      }
+      return;
+    case "select":
+      assertExactObject(action, ["kind", "target", "option"], "action");
+      validateLocator(action.target);
+      assertNonEmptyString(action.option, "select option", MAX_LOCATOR_BYTES);
+      return;
+    case "check":
+      assertExactObject(action, ["kind", "target", "checked"], "action");
+      validateLocator(action.target);
+      if (typeof action.checked !== "boolean") {
         throw new ChromeTransportError("invalid_request");
       }
       return;
@@ -789,6 +963,15 @@ function assertSafeUrl(value: unknown): asserts value is string {
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:")
     || parsed.username !== ""
     || parsed.password !== "") {
+    throw new ChromeTransportError("invalid_request");
+  }
+}
+
+function assertObserveOffset(value: unknown): asserts value is number {
+  if (typeof value !== "number"
+    || !Number.isSafeInteger(value)
+    || value < 1
+    || value > MAX_OBSERVE_OFFSET_LINES) {
     throw new ChromeTransportError("invalid_request");
   }
 }
@@ -871,8 +1054,13 @@ function isProgramErrorCode(value: string): value is ProgramErrorCode {
     || value === "protocol_failed"
     || value === "tab_already_open"
     || value === "tab_not_open"
+    || value === "element_not_found"
+    || value === "ambiguous_locator"
+    || value === "navigation_failed"
     || value === "operation_failed"
-    || value === "snapshot_failed_after_action";
+    || value === "snapshot_failed"
+    || value === "snapshot_failed_after_action"
+    || value === "close_failed";
 }
 
 function sanitizeRequestError(error: unknown): ChromeTransportError {

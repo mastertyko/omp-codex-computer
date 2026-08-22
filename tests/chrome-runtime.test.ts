@@ -5,11 +5,12 @@ import type {
   ServerRequestResponder,
 } from "../src/app-server-client";
 import { ChromeRuntime } from "../src/chrome-runtime";
-import type {
-  ChromeAction,
-  ChromeOperation,
-  ChromeResult,
-  ChromeTurnIdentity,
+import {
+  ChromeTransportError,
+  type ChromeAction,
+  type ChromeOperation,
+  type ChromeResult,
+  type ChromeTurnIdentity,
 } from "../src/chrome-transport";
 import type { InitializeResponse } from "../src/protocol";
 
@@ -383,6 +384,56 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     await runtime.endAgent();
   });
 
+  it("keeps the agent alive after benign side-effect-free failures", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+    const benignCodes = [
+      "tab_not_open",
+      "tab_already_open",
+      "invalid_request",
+      "element_not_found",
+      "ambiguous_locator",
+      "navigation_failed",
+      "snapshot_failed",
+      "snapshot_failed_after_action",
+      "close_failed",
+      "unavailable",
+    ] as const;
+    const remaining = [...benignCodes];
+    transport.executeImpl = async () => {
+      const code = remaining.shift();
+      if (code === undefined) return RESULT;
+      throw new ChromeTransportError(code);
+    };
+
+    await runtime.beginAgent(ctx);
+    for (const code of benignCodes) {
+      await expect(runtime.observe(ctx)).rejects.toMatchObject({ code });
+    }
+    expect(client.stopCalls).toBe(0);
+    expect(client.running).toBe(true);
+
+    await expect(runtime.observe(ctx)).resolves.toBe(RESULT);
+    expect(transport.executeCalls).toHaveLength(benignCodes.length + 1);
+    await runtime.endAgent();
+  });
+
+  it("still poisons on uncertain transport failures", async () => {
+    for (const code of ["operation_failed", "protocol_failed", "request_failed", "interrupted"] as const) {
+      const { client, runtime, transport } = createHarness();
+      const ctx = createContext();
+      transport.executeImpl = async () => {
+        throw new ChromeTransportError(code);
+      };
+
+      await runtime.beginAgent(ctx);
+      await expect(runtime.open(ctx)).rejects.toMatchObject({ code });
+      expect(client.stopCalls).toBe(1);
+      await expect(runtime.observe(ctx)).rejects.toThrow("remainder of this agent run");
+      await runtime.endAgent();
+    }
+  });
+
   it("hard-invalidates an in-flight dispatch when its signal aborts", async () => {
     const { client, runtime, transport } = createHarness();
     const ctx = createContext();
@@ -394,7 +445,7 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     });
 
     await runtime.beginAgent(ctx);
-    const operation = runtime.open(ctx, controller.signal);
+    const operation = runtime.open(ctx, undefined, controller.signal);
     await started.promise;
     controller.abort();
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });
@@ -413,7 +464,7 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     controller.abort();
 
     await runtime.beginAgent(ctx);
-    await expect(runtime.open(ctx, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(runtime.open(ctx, undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(client.initializeCalls).toBe(0);
     expect(client.stopCalls).toBe(0);
     expect(transport.executeCalls).toHaveLength(0);

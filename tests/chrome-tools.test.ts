@@ -82,15 +82,23 @@ describe("registerChromeTools", () => {
     expect(pi.tools).toHaveLength(3);
   });
 
-  it("uses strict empty schemas for open and observe", () => {
+  it("uses strict schemas with only the optional open url and observe offset", () => {
     const pi = createFakePi();
     registerChromeTools(pi as never, runtimeReturning({ kind: "opened" }) as unknown as ChromeRuntime);
 
-    for (const name of ["chrome_open", "chrome_observe"]) {
-      const schema = getTool(pi, name).parameters;
-      expect(schema.safeParse({}).success).toBe(true);
-      expect(schema.safeParse({ unexpected: true }).success).toBe(false);
-    }
+    const open = getTool(pi, "chrome_open").parameters;
+    expect(open.safeParse({}).success).toBe(true);
+    expect(open.safeParse({ url: "https://example.com/" }).success).toBe(true);
+    expect(open.safeParse({ url: "javascript:alert(1)" }).success).toBe(false);
+    expect(open.safeParse({ url: "https://example.com/", unexpected: true }).success).toBe(false);
+
+    const observe = getTool(pi, "chrome_observe").parameters;
+    expect(observe.safeParse({}).success).toBe(true);
+    expect(observe.safeParse({ offset: 3000 }).success).toBe(true);
+    expect(observe.safeParse({ offset: 0 }).success).toBe(false);
+    expect(observe.safeParse({ offset: 1.5 }).success).toBe(false);
+    expect(observe.safeParse({ offset: 1_000_001 }).success).toBe(false);
+    expect(observe.safeParse({ unexpected: true }).success).toBe(false);
   });
 
   it("accepts only the strict finite Chrome action union", () => {
@@ -111,6 +119,33 @@ describe("registerChromeTools", () => {
     expect(schema.safeParse({ action: { kind: "unsupported" } }).success).toBe(false);
   });
 
+  it("accepts the extended semantic actions and enforces UTF-8 byte bounds", () => {
+    const pi = createFakePi();
+    registerChromeTools(pi as never, runtimeReturning({ kind: "opened" }) as unknown as ChromeRuntime);
+    const schema = getTool(pi, "chrome_act").parameters;
+    const target = { kind: "label", label: "Country" };
+
+    expect(schema.safeParse({ action: { kind: "back" } }).success).toBe(true);
+    expect(schema.safeParse({ action: { kind: "forward" } }).success).toBe(true);
+    expect(schema.safeParse({ action: { kind: "reload" } }).success).toBe(true);
+    expect(schema.safeParse({ action: { kind: "select", target, option: "Sweden" } }).success).toBe(true);
+    expect(schema.safeParse({ action: { kind: "check", target, checked: true } }).success).toBe(true);
+
+    expect(schema.safeParse({ action: { kind: "back", url: "https://example.com/" } }).success).toBe(false);
+    expect(schema.safeParse({ action: { kind: "select", target } }).success).toBe(false);
+    expect(schema.safeParse({ action: { kind: "check", target, checked: "yes" } }).success).toBe(false);
+
+    // 600 characters of two-byte UTF-8 exceed the 1024-byte locator bound.
+    const multibyte = "Å".repeat(600);
+    expect(schema.safeParse({ action: { kind: "click", target: { kind: "text", text: multibyte } } }).success).toBe(false);
+    expect(schema.safeParse({ action: { kind: "select", target, option: multibyte } }).success).toBe(false);
+    // 20000 two-byte characters pass the char cap but exceed the 32768-byte bound.
+    expect(schema.safeParse({ action: { kind: "fill", target, value: "Å".repeat(20_000) } }).success).toBe(false);
+    expect(schema.safeParse({ action: { kind: "fill", target, value: "x".repeat(32_768) } }).success).toBe(true);
+    // URLs with embedded whitespace are rejected to mirror the transport.
+    expect(schema.safeParse({ action: { kind: "navigate", url: "https://example.com/a b" } }).success).toBe(false);
+  });
+
   it("rejects unsafe URLs and malformed semantic locators", () => {
     const pi = createFakePi();
     registerChromeTools(pi as never, runtimeReturning({ kind: "opened" }) as unknown as ChromeRuntime);
@@ -123,7 +158,7 @@ describe("registerChromeTools", () => {
     expect(schema.safeParse({ action: { kind: "fill", target: { kind: "text", text: "Submit" }, value: "x" } }).success).toBe(true);
   });
 
-  it("forwards observe calls and their abort signal", async () => {
+  it("forwards open, observe, and their parameters with the abort signal", async () => {
     const pi = createFakePi();
     const runtime = runtimeReturning({ kind: "snapshot", text: "snapshot", truncated: false, byteLength: 8 });
     registerChromeTools(pi as never, runtime as unknown as ChromeRuntime);
@@ -131,8 +166,13 @@ describe("registerChromeTools", () => {
     const controller = new AbortController();
 
     await getTool(pi, "chrome_observe").execute("call-1", {}, controller.signal, undefined, ctx);
+    expect(runtime.observe).toHaveBeenCalledWith(ctx, undefined, controller.signal);
 
-    expect(runtime.observe).toHaveBeenCalledWith(ctx, controller.signal);
+    await getTool(pi, "chrome_observe").execute("call-2", { offset: 3000 }, undefined, undefined, ctx);
+    expect(runtime.observe).toHaveBeenLastCalledWith(ctx, 3000, undefined);
+
+    await getTool(pi, "chrome_open").execute("call-3", { url: "https://example.com/" }, controller.signal, undefined, ctx);
+    expect(runtime.open).toHaveBeenLastCalledWith(ctx, "https://example.com/", controller.signal);
   });
 
   it("dispatches once and exposes only safe result fields", async () => {
