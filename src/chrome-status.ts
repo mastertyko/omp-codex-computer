@@ -5,6 +5,7 @@ import {
   getTrustedChromeVersions,
   type ChromeUnavailableReason,
 } from "./chrome-capabilities";
+import { CLIENT_INFO } from "./client-info";
 import type { InitializeResponse, McpServerStatusListResponse, PluginListResponse } from "./protocol";
 
 export type ChromeStatusReason = "ready" | "check_failed" | ChromeUnavailableReason;
@@ -29,7 +30,7 @@ export async function checkChromeStatus(cwd: string): Promise<ChromeStatus> {
     initialize = await client.requestWithNotification<InitializeResponse>(
       "initialize",
       {
-        clientInfo: { name: "omp-codex-computer", version: "0.1.1" },
+        clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: true },
       },
       "initialized",

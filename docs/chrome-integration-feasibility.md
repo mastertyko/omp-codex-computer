@@ -102,6 +102,7 @@ Observed locally against the same stack, on `https://www.selenium.dev/selenium/w
 - No approval broker for first-party browser elicitations; such flows are denied.
 - Only strictly validated version combinations are supported by default. Every Codex/plugin update requires a new contract review and live probe before the built-in allowlist is expanded; `OMP_CODEX_CHROME_TRUST` lets a user accept that responsibility per session for additional tuples.
 - Status is a compatibility check, not a connectivity check.
+- The bundled bridge clamps `waitFor` timeouts (observed ~5 s effective regardless of the requested `timeoutMs`), so slow-rendering pages can surface `element_not_found` earlier than the configured locator wait; the error is benign and an `chrome_observe` retry is safe.
 
 ## Sources
 

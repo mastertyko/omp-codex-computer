@@ -1,3 +1,4 @@
+import { CLIENT_INFO } from "../src/client-info";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import type * as FsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -538,7 +539,7 @@ describe("checkComputerUseStatus", () => {
       {
         method: "initialize",
         params: {
-          clientInfo: { name: "omp-codex-computer", version: "0.1.1" },
+          clientInfo: CLIENT_INFO,
           capabilities: { experimentalApi: true },
         },
       },

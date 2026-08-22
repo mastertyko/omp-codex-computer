@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { AppServerClient } from "./app-server-client";
+import { CLIENT_INFO } from "./client-info";
 import {
   DEFAULT_DIRECT_MCP_SERVER_NAME,
   DEFAULT_PLUGIN_NAME,
@@ -88,7 +89,7 @@ export async function checkComputerUseStatus(cwd: string): Promise<ComputerUseSt
     const appServer = await client.requestWithNotification<InitializeResponse>(
       "initialize",
       {
-        clientInfo: { name: "omp-codex-computer", version: "0.1.1" },
+        clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: true },
       },
       "initialized",

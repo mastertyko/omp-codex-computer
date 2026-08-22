@@ -15,8 +15,8 @@ import {
 import type { InitializeResponse } from "./protocol";
 import { SerialQueue } from "./queue";
 import { CodexThreadManager } from "./thread-manager";
+import { CLIENT_INFO } from "./client-info";
 
-const CLIENT_INFO = { name: "omp-codex-computer", version: "0.1.1" } as const;
 const REQUEST_TIMEOUT_MS = 120_000;
 const ELICITATION_METHOD = "mcpServer/elicitation/request";
 
