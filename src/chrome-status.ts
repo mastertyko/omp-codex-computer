@@ -1,9 +1,8 @@
 import { AppServerClient } from "./app-server-client";
 import {
-  SUPPORTED_CHROME_APP_SERVER_VERSIONS,
-  SUPPORTED_CHROME_PLUGIN_VERSIONS,
   evaluateChromeCapabilities,
   getChromeObservedVersions,
+  getTrustedChromeVersions,
   type ChromeUnavailableReason,
 } from "./chrome-capabilities";
 import type { InitializeResponse, McpServerStatusListResponse, PluginListResponse } from "./protocol";
@@ -94,12 +93,13 @@ function createStatus(input: {
   observedPluginVersions: string[];
   observedAppServerVersion?: string;
 }): ChromeStatus {
+  const trusted = getTrustedChromeVersions();
   return {
     status: input.status,
     reason: input.reason,
     message: input.message,
-    supportedPluginVersions: [...SUPPORTED_CHROME_PLUGIN_VERSIONS],
-    supportedAppServerVersions: [...SUPPORTED_CHROME_APP_SERVER_VERSIONS],
+    supportedPluginVersions: trusted.pluginVersions,
+    supportedAppServerVersions: trusted.appServerVersions,
     observedPluginVersions: input.observedPluginVersions,
     ...(input.observedAppServerVersion
       ? { observedAppServerVersion: input.observedAppServerVersion }

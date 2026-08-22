@@ -10,7 +10,7 @@ Local OMP extension that exposes OpenAI Codex Computer Use and a constrained fir
 - OMP installed
 - Accessibility and Screen Recording permissions granted when Codex Computer Use asks
 - Bundled `computer-use` Codex plugin available through app-server; this extension cannot operate without it
-- First-party Chrome support additionally requires Google Chrome, the official ChatGPT Chrome extension connected to the ChatGPT desktop app, bundled Chrome plugin `26.818.31338`, and Codex app-server `0.149.0`. Other tuples fail closed until explicitly validated.
+- First-party Chrome support additionally requires Google Chrome, the official ChatGPT Chrome extension connected to the ChatGPT desktop app, bundled Chrome plugin `26.818.31338`, and Codex app-server `0.149.0`. Other tuples fail closed until explicitly validated. After your own contract review and live probe, additional `plugin@app-server` tuples can be trusted for a session with `OMP_CODEX_CHROME_TRUST` (comma-separated, e.g. `OMP_CODEX_CHROME_TRUST=26.900.40000@0.150.0`); malformed entries are ignored and add no trust, and `/codex-computer status` shows the effective allowlist.
 
 ## Installation
 

@@ -6,6 +6,8 @@ import {
   SUPPORTED_CHROME_APP_SERVER_VERSIONS,
   SUPPORTED_CHROME_PLUGIN_VERSIONS,
   evaluateChromeCapabilities,
+  getTrustedChromeTuples,
+  getTrustedChromeVersions,
   type ChromeCapabilities,
   type ChromeUnavailableReason,
 } from "../src/chrome-capabilities";
@@ -125,6 +127,91 @@ describe("evaluateChromeCapabilities", () => {
       appServerVersion: APP_SERVER_VERSION,
       clientPath: await realpath(tree.clientPath),
       nodeReplServerName: "node_repl",
+    });
+  });
+
+  it("trusts additional exact tuples from OMP_CODEX_CHROME_TRUST", async () => {
+    const newPlugin = "26.900.40000";
+    const newAppServer = "0.150.0";
+    const tree = await createPluginTree({ name: "chrome", version: newPlugin });
+    const env = { OMP_CODEX_CHROME_TRUST: ` ${newPlugin}@${newAppServer} , ` };
+
+    const trusted = await evaluateChromeCapabilities(
+      initialize(newAppServer),
+      pluginList(tree.root, { localVersion: newPlugin }),
+      mcp(),
+      env,
+    );
+    expect(trusted).toMatchObject({ status: "ready", pluginVersion: newPlugin, appServerVersion: newAppServer });
+
+    const builtIn = await evaluateChromeCapabilities(
+      initialize(),
+      pluginList((await createPluginTree()).root),
+      mcp(),
+      env,
+    );
+    expect(builtIn).toMatchObject({ status: "ready", pluginVersion: CHROME_VERSION });
+  });
+
+  it("requires env trust to pair plugin and app-server versions exactly", async () => {
+    const newPlugin = "26.900.40000";
+    const tree = await createPluginTree({ name: "chrome", version: newPlugin });
+    const env = { OMP_CODEX_CHROME_TRUST: `${newPlugin}@0.150.0` };
+
+    // Env plugin with the built-in app-server version is a different, untrusted tuple.
+    const crossed = await evaluateChromeCapabilities(
+      initialize(),
+      pluginList(tree.root, { localVersion: newPlugin }),
+      mcp(),
+      env,
+    );
+    expectUnavailable(crossed, "unsupported_version_tuple");
+
+    // Built-in plugin with the env app-server version is equally untrusted.
+    const reversed = await evaluateChromeCapabilities(
+      initialize("0.150.0"),
+      pluginList((await createPluginTree()).root),
+      mcp(),
+      env,
+    );
+    expectUnavailable(reversed, "unsupported_version_tuple");
+  });
+
+  it("ignores malformed trust entries without widening trust", async () => {
+    const tree = await createPluginTree({ name: "chrome", version: "26.900.40000" });
+    const malformed = [
+      "26.900.40000",
+      "26.900.40000@0.150.0@extra",
+      "@0.150.0",
+      "26.900.40000@",
+      "26.900.40000@0.150 .0",
+      "javascript:x@0.150.0",
+      "",
+      "   ",
+    ].join(",");
+
+    const result = await evaluateChromeCapabilities(
+      initialize("0.150.0"),
+      pluginList(tree.root, { localVersion: "26.900.40000" }),
+      mcp(),
+      { OMP_CODEX_CHROME_TRUST: malformed },
+    );
+    expectUnavailable(result, "unsupported_version_tuple");
+
+    expect(getTrustedChromeTuples({ OMP_CODEX_CHROME_TRUST: malformed }))
+      .toEqual(getTrustedChromeTuples({}));
+  });
+
+  it("derives effective version lists for status display", () => {
+    expect(getTrustedChromeVersions({})).toEqual({
+      pluginVersions: [CHROME_VERSION],
+      appServerVersions: [APP_SERVER_VERSION],
+    });
+    expect(getTrustedChromeVersions({
+      OMP_CODEX_CHROME_TRUST: `26.900.40000@0.150.0,26.900.40000@0.150.0,${CHROME_VERSION}@${APP_SERVER_VERSION}`,
+    })).toEqual({
+      pluginVersions: [CHROME_VERSION, "26.900.40000"],
+      appServerVersions: [APP_SERVER_VERSION, "0.150.0"],
     });
   });
 
