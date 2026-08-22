@@ -27,7 +27,7 @@ bun run test:watch
 For an OMP smoke test:
 
 ```bash
-omp-dev -e .
+omp -e .
 ```
 
 Then run these commands inside OMP:

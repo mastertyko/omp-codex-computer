@@ -45,7 +45,7 @@ The extension registers `computer_use_*` tools for native macOS app inspection a
 
 It also registers `chrome_open`, `chrome_observe`, and `chrome_act` against OpenAI's bundled first-party Chrome browser client. This is intentionally narrower than Codex `@Chrome`: it owns one new blank tab per OMP agent run and never enumerates, selects, or attaches to the user's existing tabs.
 
-Use `omp-dev -e .` for a local smoke test without installing the package.
+Use `omp -e .` for a local smoke test without installing the package.
 
 ## Uninstallation
 
@@ -110,7 +110,12 @@ bun run check
 Local OMP smoke:
 
 ```bash
-omp-dev -e .
+omp -e .
+```
+
+Inside OMP:
+
+```text
 /codex-computer diagnose
 ```
 
@@ -120,12 +125,12 @@ Verified on 2026-08-22 with OMP v17.3.4, Codex CLI/app-server 0.149.0, bundled C
 - `npm pack --dry-run` completed successfully.
 - The Chrome compatibility probe reported `ready` for the exact trusted plugin/app-server tuple; it did not bootstrap the browser.
 - A live `ChromeRuntime` opened a blank extension-backed tab, returned an empty snapshot, navigated to `https://example.com/`, clicked `Learn more` with a semantic text locator, returned the IANA snapshot, closed the tab, and completed cleanup.
-- An end-to-end `omp-dev -e .` agent run loaded the extension's real OMP-compatible schemas, used only `chrome_open`/`chrome_act`, reported the `Example Domain` heading, and closed the tab.
+- An end-to-end `omp -e .` agent run loaded the extension's real OMP-compatible schemas, used only `chrome_open`/`chrome_act`, reported the `Example Domain` heading, and closed the tab.
 
 Re-verified on 2026-08-23 for the extended Chrome surface, same stack:
 
-- `bun run check` passed with 209 tests across 17 files.
+- `bun run check` passed with 213 tests across 17 files.
 - A live `ChromeRuntime` opened `https://www.selenium.dev/selenium/web/web-form.html` directly through `chrome_open` with a URL, then exercised select-by-label, checkbox setChecked, fill with multibyte text, navigate, back, forward, reload, offset-paged observe, and close — three consecutive full runs green.
 - A missing locator returned `element_not_found` and a two-match locator returned `ambiguous_locator`; both were side-effect free and the same Chrome run continued and completed cleanup afterwards.
 - A raw bridge probe confirmed strict-mode Playwright semantics upstream and working `nth()`/`isVisible()` primitives for the visible-aware locator resolver.
-- An end-to-end `omp-dev -e . -p` agent run enabled the tools with `/codex-computer enable`, loaded the extended schemas through OMP's real Zod surface, opened `https://example.com/` via `chrome_open` with its `url` parameter, reported the `Example Domain` heading, and closed the tab.
+- An end-to-end `omp -e . -p` agent run enabled the tools with `/codex-computer enable`, loaded the extended schemas through OMP's real Zod surface, opened `https://example.com/` via `chrome_open` with its `url` parameter, reported the `Example Domain` heading, and closed the tab.
