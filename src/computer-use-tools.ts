@@ -40,14 +40,14 @@ const COMPUTER_USE_UPSTREAM_TOOLS = [
     name: "computer_use_get_app_state",
     mcpToolName: "get_app_state",
     label: "Get App State",
-    description: "Inspect the current state of an application for Computer Use. Prefer stable app targets such as bundle id or .app path over display name. If this returns Invalid app for a local development GUI process, call computer_use_resolve_app; raw executables may have visible windows but be missing from the Computer Use app index.",
+    description: "Inspect the current state of an application for Computer Use. Prefer stable app targets such as bundle id or .app path over display name. Set disableDiff to true when a complete accessibility tree is needed instead of a diff. If this returns Invalid app for a local development GUI process, call computer_use_resolve_app; raw executables may have visible windows but be missing from the Computer Use app index.",
     approval: "read",
   },
   {
     name: "computer_use_click",
     mcpToolName: "click",
     label: "Click",
-    description: "Click a target in an application through Computer Use.",
+    description: "Click a target in an application through Computer Use. Provide element_index or both x and y; prefer element_index from the latest app state.",
     approval: "write",
   },
   {
@@ -200,65 +200,82 @@ async function executeLocalTool(
 
 function createParameterSchemas(pi: ExtensionAPI): Record<ComputerUseToolName, unknown> {
   const z = pi.zod;
+  const allowUnknownProperties = <T>(schema: T): T => {
+    return (schema as T & { passthrough(): T }).passthrough();
+  };
   const app = z.string().describe("The application to inspect or control.");
   const appTarget = z.string().describe("Application name, bundle id, .app path, executable path, PID string, or window owner name to resolve.");
-  const elementIndex = z.string().describe("The target element index from the app state.");
+  const elementIndex = z.string()
+    .regex(/^[0-9]+$/, "The element index must be a base-10 integer string.")
+    .describe("The target element index from the app state.");
+
+  const click = allowUnknownProperties(z.object({
+    app,
+    element_index: elementIndex.optional(),
+    x: z.number().describe("The x coordinate to click.").optional(),
+    y: z.number().describe("The y coordinate to click.").optional(),
+    click_count: z.number().int().min(1).describe("The number of clicks to perform.").optional(),
+    mouse_button: z.enum(["left", "right", "middle"]).describe("The mouse button to click.").optional(),
+  })).refine((params) => {
+    const hasElementIndex = params.element_index !== undefined;
+    const hasX = params.x !== undefined;
+    const hasY = params.y !== undefined;
+    return hasX === hasY && (hasElementIndex || hasX);
+  }, {
+    message: "Provide element_index or both x and y; click coordinates must be paired.",
+  });
 
   return {
     computer_use_list_apps: z.object({}),
-    computer_use_get_app_state: z.object({
+    computer_use_get_app_state: allowUnknownProperties(z.object({
       app,
-    }).passthrough(),
-    computer_use_click: z.object({
-      app,
-      element_index: elementIndex.optional(),
-      x: z.number().describe("The x coordinate to click.").optional(),
-      y: z.number().describe("The y coordinate to click.").optional(),
-      click_count: z.number().int().describe("The number of clicks to perform.").optional(),
-      mouse_button: z.enum(["left", "right", "middle"]).describe("The mouse button to click.").optional(),
-    }).passthrough(),
-    computer_use_type_text: z.object({
+      disableDiff: z.boolean()
+        .describe("Return a complete accessibility tree instead of a diff from the previous app state.")
+        .optional(),
+    })),
+    computer_use_click: click,
+    computer_use_type_text: allowUnknownProperties(z.object({
       app,
       text: z.string().describe("The text to type."),
-    }).passthrough(),
-    computer_use_press_key: z.object({
+    })),
+    computer_use_press_key: allowUnknownProperties(z.object({
       app,
       key: z.string().describe("The key or keyboard shortcut to press."),
-    }).passthrough(),
-    computer_use_scroll: z.object({
+    })),
+    computer_use_scroll: allowUnknownProperties(z.object({
       app,
       element_index: elementIndex,
       direction: z.enum(["up", "down", "left", "right"]).describe("The scroll direction."),
       pages: z.number().describe("The number of pages to scroll.").optional(),
-    }).passthrough(),
-    computer_use_drag: z.object({
+    })),
+    computer_use_drag: allowUnknownProperties(z.object({
       app,
       from_x: z.number().describe("The drag start x coordinate."),
       from_y: z.number().describe("The drag start y coordinate."),
       to_x: z.number().describe("The drag end x coordinate."),
       to_y: z.number().describe("The drag end y coordinate."),
-    }).passthrough(),
-    computer_use_set_value: z.object({
+    })),
+    computer_use_set_value: allowUnknownProperties(z.object({
       app,
       element_index: elementIndex,
       value: z.string().describe("The value to set."),
-    }).passthrough(),
-    computer_use_select_text: z.object({
+    })),
+    computer_use_select_text: allowUnknownProperties(z.object({
       app,
       element_index: elementIndex,
       text: z.string().describe("The text to select."),
       selection: z.enum(["text", "cursor_before", "cursor_after"]).describe("The selection behavior.").optional(),
       prefix: z.string().describe("Text before the target selection.").optional(),
       suffix: z.string().describe("Text after the target selection.").optional(),
-    }).passthrough(),
-    computer_use_perform_secondary_action: z.object({
+    })),
+    computer_use_perform_secondary_action: allowUnknownProperties(z.object({
       app,
       element_index: elementIndex,
       action: z.string().describe("The secondary action to perform."),
-    }).passthrough(),
-    computer_use_resolve_app: z.object({
+    })),
+    computer_use_resolve_app: allowUnknownProperties(z.object({
       app: appTarget,
-    }).passthrough(),
+    })),
   };
 }
 

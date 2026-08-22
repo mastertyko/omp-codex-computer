@@ -46,8 +46,8 @@ interface FakeMcpResponse {
 class FakeClient implements Pick<AppServerClient, "request"> {
   readonly calls: RecordedRequest[] = [];
   readonly toolResponses: unknown[] = [];
-  pluginResponse: PluginListResponse = currentPluginList();
-  mcpResponse: McpServerStatusListResponse = { data: [] };
+  pluginResponse: PluginListResponse | Promise<PluginListResponse> = currentPluginList();
+  mcpResponse: McpServerStatusListResponse | Promise<McpServerStatusListResponse> = { data: [] };
 
   async request<TResult = unknown>(
     method: string,
@@ -63,8 +63,8 @@ class FakeClient implements Pick<AppServerClient, "request"> {
     };
     this.calls.push(call);
 
-    if (method === "plugin/list") return this.pluginResponse as unknown as TResult;
-    if (method === "mcpServerStatus/list") return this.mcpResponse as unknown as TResult;
+    if (method === "plugin/list") return await this.pluginResponse as unknown as TResult;
+    if (method === "mcpServerStatus/list") return await this.mcpResponse as unknown as TResult;
     if (method !== "mcpServer/tool/call") throw new Error(`Unexpected request: ${method}`);
     if (this.toolResponses.length === 0) throw new Error("No queued MCP tool response");
 
@@ -189,7 +189,14 @@ describe("ComputerUseTransport", () => {
     const client = new FakeClient();
     client.pluginResponse = currentPluginList();
     client.mcpResponse = { data: [directServer(), nodeReplServer()] };
-    const apps = [{ id: "com.apple.Calculator", displayName: "Calculator" }];
+    const apps = [{
+      id: "com.apple.Calculator",
+      displayName: "Calculator",
+      isRunning: true,
+      lastUsedDate: 809_049_600,
+      useCount: 42,
+    }];
+    const modelVisibleApps = [{ id: "com.apple.Calculator", displayName: "Calculator", isRunning: true }];
     client.toolResponses.push(skySuccess("bootstrap"), skySuccess("dispatch", apps));
     const transport = new ComputerUseTransport(client, new FakeThreads());
     const controller = new AbortController();
@@ -198,7 +205,7 @@ describe("ComputerUseTransport", () => {
 
     expect(result).toEqual({
       route: "sky",
-      content: [{ type: "text", text: JSON.stringify(apps, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(modelVisibleApps, null, 2) }],
       structuredContent: apps,
     });
     expect(client.calls.map((call) => call.method)).toEqual([
@@ -228,6 +235,28 @@ describe("ComputerUseTransport", () => {
     expect(programFrom(bootstrap)).toContain('await import("@oai/sky")');
     expect(programFrom(bootstrap)).not.toContain("computer-use-client.mjs");
     expect(decodeSkyPayload(programFrom(dispatch))).toEqual({ tool: "list_apps", args: {} });
+  });
+
+  it("starts plugin and MCP discovery concurrently", async () => {
+    const client = new FakeClient();
+    const pluginDiscovery = Promise.withResolvers<PluginListResponse>();
+    const mcpDiscovery = Promise.withResolvers<McpServerStatusListResponse>();
+    client.pluginResponse = pluginDiscovery.promise;
+    client.mcpResponse = mcpDiscovery.promise;
+    client.toolResponses.push({ content: [{ type: "text", text: "apps" }] });
+    const transport = new ComputerUseTransport(client, new FakeThreads());
+
+    const resultPromise = transport.callTool("/work", "list_apps", {});
+    await Promise.resolve();
+
+    expect(client.calls.map((call) => call.method)).toEqual([
+      "plugin/list",
+      "mcpServerStatus/list",
+    ]);
+
+    pluginDiscovery.resolve(currentPluginList());
+    mcpDiscovery.resolve({ data: [directServer()] });
+    await expect(resultPromise).resolves.toMatchObject({ route: "direct" });
   });
 
   it("prepare observes and caches the route selected from supplied discovery", async () => {
@@ -343,7 +372,10 @@ describe("ComputerUseTransport", () => {
     client.toolResponses.push(skySuccess("bootstrap"), dispatch);
     const transport = new ComputerUseTransport(client, new FakeThreads());
 
-    const result = await transport.callTool("/work", "get_app_state", { app: "Calculator" });
+    const result = await transport.callTool("/work", "get_app_state", {
+      app: "Calculator",
+      disableDiff: true,
+    });
 
     expect(result.route).toBe("sky");
     if (!Array.isArray(result.content)) throw new Error("Expected normalized content blocks");
@@ -355,6 +387,12 @@ describe("ComputerUseTransport", () => {
       mimeType: "image/png",
     });
     expect(result._meta).toBe(meta);
+    const getAppStateDispatch = toolRequests(client)[1];
+    if (!getAppStateDispatch) throw new Error("Expected a Sky dispatch request");
+    expect(decodeSkyPayload(programFrom(getAppStateDispatch))).toEqual({
+      tool: "get_app_state",
+      args: { app: "Calculator", disableDiff: true },
+    });
   });
 
   it("sniffs local Sky screenshot bytes before emitting image content", async () => {

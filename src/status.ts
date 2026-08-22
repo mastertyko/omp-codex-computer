@@ -93,8 +93,10 @@ export async function checkComputerUseStatus(cwd: string): Promise<ComputerUseSt
       },
       "initialized",
     );
-    const plugins = await client.request<PluginListResponse>("plugin/list", {});
-    const mcp = await client.request<McpServerStatusListResponse>("mcpServerStatus/list", {});
+    const [plugins, mcp] = await Promise.all([
+      client.request<PluginListResponse>("plugin/list", {}),
+      client.request<McpServerStatusListResponse>("mcpServerStatus/list", {}),
+    ]);
     let transportRoute: ComputerUseRoute | undefined;
     let transportError: string | undefined;
     try {

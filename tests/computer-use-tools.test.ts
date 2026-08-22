@@ -166,6 +166,8 @@ describe("registerComputerUseTools", () => {
     const getAppState = getRegisteredTool(pi, "computer_use_get_app_state").parameters;
     expect(getAppState.safeParse({}).success).toBe(false);
     expect(getAppState.safeParse({ app: "Finder" }).success).toBe(true);
+    expect(getAppState.safeParse({ app: "Finder", disableDiff: true }).success).toBe(true);
+    expect(getAppState.safeParse({ app: "Finder", disableDiff: "yes" }).success).toBe(false);
 
     const resolveApp = getRegisteredTool(pi, "computer_use_resolve_app").parameters;
     expect(resolveApp.safeParse({}).success).toBe(false);
@@ -179,7 +181,13 @@ describe("registerComputerUseTools", () => {
     expect(click.safeParse({ element_index: "1" }).success).toBe(false);
     expect(click.safeParse({ app: "Finder", element_index: "1" }).success).toBe(true);
     expect(click.safeParse({ app: "Finder", x: 12, y: 34 }).success).toBe(true);
-    expect(click.safeParse({ app: "Finder", click_count: 2 }).success).toBe(true);
-    expect(click.safeParse({ app: "Finder", click_count: 1.5 }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", element_index: "1", x: 12, y: 34 }).success).toBe(true);
+    expect(click.safeParse({ app: "Finder" }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", click_count: 2 }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", x: 12 }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", y: 34 }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", element_index: "not-an-index" }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", element_index: "1", click_count: 0 }).success).toBe(false);
+    expect(click.safeParse({ app: "Finder", element_index: "1", click_count: 1.5 }).success).toBe(false);
   });
 });
