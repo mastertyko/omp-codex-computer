@@ -1,3 +1,4 @@
+import { CLIENT_INFO } from "../src/client-info";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerRequestResponder } from "../src/app-server-client";
@@ -231,7 +232,7 @@ describe("ComputerUseRuntime lifecycle", () => {
     expect(client.requestWithNotification).toHaveBeenCalledWith(
       "initialize",
       {
-        clientInfo: { name: "omp-codex-computer", version: "0.1.1" },
+        clientInfo: CLIENT_INFO,
         capabilities: { experimentalApi: true },
       },
       "initialized",
