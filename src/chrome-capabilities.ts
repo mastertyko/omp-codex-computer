@@ -6,8 +6,25 @@ import type {
   PluginListResponse,
 } from "./protocol";
 
-export const SUPPORTED_CHROME_PLUGIN_VERSIONS: readonly string[] = Object.freeze(["26.818.31338"]);
-export const SUPPORTED_CHROME_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(["0.149.0"]);
+export const CHROME_TRUST_ENV_VAR = "OMP_CODEX_CHROME_TRUST";
+
+export interface ChromeTrustedTuple {
+  pluginVersion: string;
+  appServerVersion: string;
+}
+
+// The built-in allowlist only grows through the CONTRIBUTING review process:
+// contract review, focused compatibility tests, and a live open/action/close smoke.
+const BUILT_IN_TRUSTED_TUPLES: readonly ChromeTrustedTuple[] = Object.freeze([
+  Object.freeze({ pluginVersion: "26.818.31338", appServerVersion: "0.149.0" }),
+]);
+
+export const SUPPORTED_CHROME_PLUGIN_VERSIONS: readonly string[] = Object.freeze(
+  [...new Set(BUILT_IN_TRUSTED_TUPLES.map((tuple) => tuple.pluginVersion))],
+);
+export const SUPPORTED_CHROME_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(
+  [...new Set(BUILT_IN_TRUSTED_TUPLES.map((tuple) => tuple.appServerVersion))],
+);
 
 const TRUSTED_MARKETPLACE_NAME = "openai-bundled";
 const CHROME_PLUGIN_ID = "chrome@openai-bundled";
@@ -78,7 +95,7 @@ type PluginSelection =
 
 const UNAVAILABLE_MESSAGES: Readonly<Record<ChromeUnavailableReason, string>> = Object.freeze({
   app_server_version_unavailable: "Chrome is unavailable because the Codex app-server version could not be verified.",
-  unsupported_version_tuple: "Chrome is unavailable because the installed app-server and Chrome plugin versions are not supported together.",
+  unsupported_version_tuple: "Chrome is unavailable because the installed app-server and Chrome plugin versions are not supported together. After your own contract review and live probe, OMP_CODEX_CHROME_TRUST can trust an additional plugin@app-server tuple.",
   marketplace_unavailable: "Chrome is unavailable because the trusted bundled marketplace is missing or ambiguous.",
   plugin_unavailable: "Chrome is unavailable because the bundled Chrome plugin is missing or ambiguous.",
   plugin_not_installed: "Chrome is unavailable because the bundled Chrome plugin is not installed.",
@@ -89,14 +106,53 @@ const UNAVAILABLE_MESSAGES: Readonly<Record<ChromeUnavailableReason, string>> = 
   plugin_artifact_untrusted: "Chrome is unavailable because the bundled Chrome plugin artifacts could not be trusted.",
 });
 
+export function getTrustedChromeTuples(env: NodeJS.ProcessEnv = process.env): readonly ChromeTrustedTuple[] {
+  const raw = env[CHROME_TRUST_ENV_VAR];
+  if (typeof raw !== "string" || raw.trim().length === 0) return BUILT_IN_TRUSTED_TUPLES;
+
+  const tuples = [...BUILT_IN_TRUSTED_TUPLES];
+  const seen = new Set(tuples.map((tuple) => `${tuple.pluginVersion}@${tuple.appServerVersion}`));
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    const parts = trimmed.split("@");
+    if (parts.length !== 2) continue;
+    const [pluginVersion, appServerVersion] = parts;
+    // Fail closed: malformed entries add no trust.
+    if (pluginVersion === undefined
+      || appServerVersion === undefined
+      || !SAFE_VERSION_PATTERN.test(pluginVersion)
+      || !SAFE_VERSION_PATTERN.test(appServerVersion)
+      || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    tuples.push({ pluginVersion, appServerVersion });
+  }
+  return tuples;
+}
+
+export function getTrustedChromeVersions(env: NodeJS.ProcessEnv = process.env): {
+  pluginVersions: string[];
+  appServerVersions: string[];
+} {
+  const tuples = getTrustedChromeTuples(env);
+  return {
+    pluginVersions: [...new Set(tuples.map((tuple) => tuple.pluginVersion))],
+    appServerVersions: [...new Set(tuples.map((tuple) => tuple.appServerVersion))],
+  };
+}
+
 export async function evaluateChromeCapabilities(
   initialize: InitializeResponse,
   plugins: PluginListResponse,
   mcp: McpServerStatusListResponse,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<ChromeCapabilities> {
+  const trustedTuples = getTrustedChromeTuples(env);
   const appServerVersion = extractAppServerVersion(initialize);
   if (!appServerVersion) return unavailable("app_server_version_unavailable");
-  if (!SUPPORTED_CHROME_APP_SERVER_VERSIONS.includes(appServerVersion)) {
+  if (!trustedTuples.some((tuple) => tuple.appServerVersion === appServerVersion)) {
     return unavailable("unsupported_version_tuple");
   }
 
@@ -110,7 +166,8 @@ export async function evaluateChromeCapabilities(
 
   const pluginVersion = plugin.localVersion;
   if (typeof pluginVersion !== "string"
-    || !SUPPORTED_CHROME_PLUGIN_VERSIONS.includes(pluginVersion)) {
+    || !trustedTuples.some((tuple) =>
+      tuple.pluginVersion === pluginVersion && tuple.appServerVersion === appServerVersion)) {
     return unavailable("unsupported_version_tuple");
   }
 

@@ -56,6 +56,8 @@ The currently validated combination is:
 
 An unknown version, ambiguous marketplace/plugin/server, non-local source, missing file, manifest mismatch, or symlink escape yields `Chrome unavailable`. No alternative transport is attempted.
 
+Version trust is tuple-based: the built-in allowlist pairs each plugin version with the app-server version it was validated against. Users can extend it for a session with `OMP_CODEX_CHROME_TRUST`, a comma-separated list of `plugin@app-server` entries, after performing their own contract review and live probe. Malformed entries are ignored and add no trust, pairs are matched exactly (never cross-combined), and every other artifact check — canonical local root, manifest match, unambiguous `node_repl/js` — still applies to env-trusted tuples. The built-in list only grows through the review process in CONTRIBUTING.
+
 `/codex-computer status` only verifies this static contract. It does not bootstrap the browser service and therefore cannot prove that the Chrome extension is connected. The operational connection is first verified by `chrome_open`.
 
 ## Security decisions
@@ -98,7 +100,7 @@ Observed locally against the same stack, on `https://www.selenium.dev/selenium/w
 - No listing or takeover of existing tabs.
 - No history enumeration, screenshots, upload/download, browser auth, or connector APIs.
 - No approval broker for first-party browser elicitations; such flows are denied.
-- Only the strictly validated version combination is supported. Every Codex/plugin update requires a new contract review and live probe before the allowlist is expanded.
+- Only strictly validated version combinations are supported by default. Every Codex/plugin update requires a new contract review and live probe before the built-in allowlist is expanded; `OMP_CODEX_CHROME_TRUST` lets a user accept that responsibility per session for additional tuples.
 - Status is a compatibility check, not a connectivity check.
 
 ## Sources
