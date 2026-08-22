@@ -15,8 +15,8 @@ Include:
 - affected commit or version
 - reproduction steps
 - expected impact
-- whether the issue can expose desktop content, screenshots, credentials, tokens, cookies, headers, or local files
+- whether the issue can expose desktop/browser content, screenshots, page text, URLs, tab or history data, credentials, tokens, cookies, headers, or local files
 
 ## Security expectations
 
-This project must not commit credentials, tokens, private keys, screenshots, `.env` files, or local app-server logs. Runtime logs must redact sensitive fields before output. Desktop automation changes must fail closed when required permissions, UI, or Codex Computer Use dependencies are unavailable.
+This project must not commit credentials, tokens, private keys, screenshots, `.env` files, or local app-server logs. Runtime logs must redact sensitive fields before output. Desktop automation changes must fail closed when required permissions, UI, or Codex Computer Use dependencies are unavailable. Chrome changes must keep browser handles and `node_repl` private, fail closed on unknown versions or elicitation, and never replay or fall back after a possible dispatch.

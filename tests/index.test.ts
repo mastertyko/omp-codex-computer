@@ -1,27 +1,56 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod/v4";
+import { CHROME_TOOL_NAMES } from "../src/chrome-tools";
 import { COMPUTER_USE_TOOL_NAMES } from "../src/computer-use-tools";
+import ompCodexComputer from "../src/index";
 
-const runtimeInstances: FakeRuntime[] = [];
+const runtimeMock = vi.hoisted(() => {
+  class FakeRuntime {
+    setContext = vi.fn();
+    resetSession = vi.fn();
+    shutdown = vi.fn(async () => {});
+    callTool = vi.fn();
+    setStatusVisible = vi.fn();
+    constructor() {
+      runtimeInstances.push(this);
+    }
+  }
+
+  class FakeChromeRuntime {
+    beginAgent = vi.fn(async () => {});
+    endAgent = vi.fn(async () => {});
+    shutdown = vi.fn(async () => {});
+    open = vi.fn();
+    observe = vi.fn();
+    act = vi.fn();
+    constructor() {
+      chromeRuntimeInstances.push(this);
+    }
+  }
+
+  const runtimeInstances: FakeRuntime[] = [];
+  const chromeRuntimeInstances: FakeChromeRuntime[] = [];
+  return { FakeRuntime, FakeChromeRuntime, runtimeInstances, chromeRuntimeInstances };
+});
 const statusMock = vi.hoisted(() => ({
   checkComputerUseStatus: vi.fn(async () => ({ reason: "ready", message: "ok" })),
   formatComputerUseStatus: vi.fn(() => "Computer Use status: ready"),
 }));
+const chromeStatusMock = vi.hoisted(() => ({
+  checkChromeStatus: vi.fn(async () => ({ status: "ready", reason: "ready", message: "ok" })),
+  formatChromeStatus: vi.fn(() => "Chrome status: ready"),
+}));
 
-class FakeRuntime {
-  setContext = vi.fn();
-  resetSession = vi.fn();
-  shutdown = vi.fn(async () => {});
-  callTool = vi.fn();
-  setStatusVisible = vi.fn();
-  constructor() {
-    runtimeInstances.push(this);
-  }
-}
+const { runtimeInstances, chromeRuntimeInstances } = runtimeMock;
 
 vi.mock("../src/runtime", () => ({
-  ComputerUseRuntime: FakeRuntime,
+  ComputerUseRuntime: runtimeMock.FakeRuntime,
 }));
+vi.mock("../src/chrome-runtime", () => ({
+  ChromeRuntime: runtimeMock.FakeChromeRuntime,
+}));
+
+vi.mock("../src/chrome-status", () => chromeStatusMock);
 
 vi.mock("../src/status", () => statusMock);
 
@@ -69,27 +98,38 @@ function createCommandContext() {
     ui: {
       notify: vi.fn(),
     },
+    sessionManager: {
+      getSessionId: () => "omp-session-1",
+    },
   };
 }
 
 beforeEach(() => {
   runtimeInstances.length = 0;
+  chromeRuntimeInstances.length = 0;
   statusMock.checkComputerUseStatus.mockClear();
   statusMock.formatComputerUseStatus.mockClear();
+  chromeStatusMock.checkChromeStatus.mockClear();
+  chromeStatusMock.formatChromeStatus.mockClear();
 });
 
 describe("ompCodexComputer", () => {
-  it("registers only Computer Use tools, resources, lifecycle hooks, and the codex-computer command", async () => {
+  it("registers distinct Computer Use and Chrome tools, resources, lifecycle hooks, and the codex-computer command", async () => {
     const pi = createFakePi();
-    const { default: ompCodexComputer } = await import("../src/index");
 
     ompCodexComputer(pi as never);
 
     const registeredToolNames = pi.tools.map((tool) => (tool as { name: string }).name);
-    expect(registeredToolNames).toEqual(COMPUTER_USE_TOOL_NAMES);
+    expect(registeredToolNames).toEqual([...COMPUTER_USE_TOOL_NAMES, ...CHROME_TOOL_NAMES]);
     expect(pi.commands.has("codex-computer")).toBe(true);
-    expect(pi.commands.get("codex-computer")?.description).toBe("Manage Codex Computer Use tools.");
-    expect([...pi.handlers.keys()].sort()).toEqual(["agent_end", "resources_discover", "session_shutdown", "session_start"]);
+    expect(pi.commands.get("codex-computer")?.description).toBe("Manage Codex Computer Use and Chrome tools.");
+    expect([...pi.handlers.keys()].sort()).toEqual([
+      "agent_end",
+      "agent_start",
+      "resources_discover",
+      "session_shutdown",
+      "session_start",
+    ]);
 
     const resources = await pi.handlers.get("resources_discover")?.[0]({ type: "resources_discover" }, createCommandContext());
     expect(resources).toEqual({ skillPaths: [expect.stringContaining("/skills")] });
@@ -106,10 +146,33 @@ describe("ompCodexComputer", () => {
     ]);
   });
 
-  it("enables and disables only Computer Use tools while leaving non-managed tools alone", async () => {
+  it("binds Chrome to the agent lifecycle and keeps session cleanup isolated", async () => {
+    const pi = createFakePi();
+    const ctx = createCommandContext();
+    ompCodexComputer(pi as never);
+    const computerRuntime = runtimeInstances.at(-1);
+    const chromeRuntime = chromeRuntimeInstances.at(-1);
+
+    await pi.handlers.get("session_start")?.[0]({ type: "session_start" }, ctx);
+    expect(chromeRuntime?.shutdown).toHaveBeenCalledTimes(1);
+    expect(computerRuntime?.setContext).toHaveBeenCalledWith(ctx);
+    expect(computerRuntime?.resetSession).toHaveBeenCalledTimes(1);
+
+    await pi.handlers.get("agent_start")?.[0]({ type: "agent_start" }, ctx);
+    expect(chromeRuntime?.beginAgent).toHaveBeenCalledWith(ctx);
+
+    await pi.handlers.get("agent_end")?.[0]({ type: "agent_end" }, ctx);
+    expect(computerRuntime?.shutdown).toHaveBeenCalledTimes(1);
+    expect(chromeRuntime?.endAgent).toHaveBeenCalledTimes(1);
+
+    await pi.handlers.get("session_shutdown")?.[0]({ type: "session_shutdown" }, ctx);
+    expect(computerRuntime?.shutdown).toHaveBeenCalledTimes(2);
+    expect(chromeRuntime?.shutdown).toHaveBeenCalledTimes(2);
+  });
+
+  it("enables and disables only managed Codex automation tools while leaving other tools alone", async () => {
     const pi = createFakePi(["read", "computer_use_click"]);
     const ctx = createCommandContext();
-    const { default: ompCodexComputer } = await import("../src/index");
     ompCodexComputer(pi as never);
     const command = pi.commands.get("codex-computer");
 
@@ -118,32 +181,34 @@ describe("ompCodexComputer", () => {
       "read",
       "computer_use_click",
       ...COMPUTER_USE_TOOL_NAMES.filter((name) => name !== "computer_use_click"),
+      ...CHROME_TOOL_NAMES,
     ]);
 
     await command?.handler("disable", ctx);
     expect(pi.setActiveToolsCalls[1]).toEqual(["read"]);
     expect(runtimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
-    expect(ctx.ui.notify).toHaveBeenCalledWith("Codex Computer Use tools disabled.", "info");
+    expect(chromeRuntimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Codex Computer Use and Chrome tools disabled.", "info");
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
-      content: "Codex Computer Use tools disabled.",
+      content: "Codex Computer Use and Chrome tools disabled.",
       display: true,
     });
   });
 
-  it("restarts only the Computer Use runtime", async () => {
+  it("restarts both Codex automation runtimes", async () => {
     const pi = createFakePi();
     const ctx = createCommandContext();
-    const { default: ompCodexComputer } = await import("../src/index");
     ompCodexComputer(pi as never);
     const command = pi.commands.get("codex-computer");
 
     await command?.handler("restart", ctx);
 
     expect(runtimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
+    expect(chromeRuntimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
-      content: "Codex Computer Use runtime restarted. It will reconnect on the next tool call.",
+      content: "Codex automation runtimes restarted. They will reconnect on the next tool call.",
       display: true,
     });
   });
@@ -151,7 +216,6 @@ describe("ompCodexComputer", () => {
   it("hides and shows the footer status through the runtime command handlers", async () => {
     const pi = createFakePi();
     const ctx = createCommandContext();
-    const { default: ompCodexComputer } = await import("../src/index");
     ompCodexComputer(pi as never);
     const command = pi.commands.get("codex-computer");
     const runtime = runtimeInstances.at(-1);
@@ -181,10 +245,9 @@ describe("ompCodexComputer", () => {
     });
   });
 
-  it("handles status and diagnose commands with only Computer Use status output", async () => {
+  it("handles status and diagnose commands with distinct Computer Use and Chrome output", async () => {
     const pi = createFakePi();
     const ctx = createCommandContext();
-    const { default: ompCodexComputer } = await import("../src/index");
     ompCodexComputer(pi as never);
     const command = pi.commands.get("codex-computer");
 
@@ -193,16 +256,19 @@ describe("ompCodexComputer", () => {
 
     expect(statusMock.checkComputerUseStatus).toHaveBeenNthCalledWith(1, "/tmp/project");
     expect(statusMock.checkComputerUseStatus).toHaveBeenNthCalledWith(2, "/tmp/project");
+    expect(chromeStatusMock.checkChromeStatus).toHaveBeenNthCalledWith(1, "/tmp/project");
+    expect(chromeStatusMock.checkChromeStatus).toHaveBeenNthCalledWith(2, "/tmp/project");
     expect(statusMock.formatComputerUseStatus).toHaveBeenCalledTimes(2);
+    expect(chromeStatusMock.formatChromeStatus).toHaveBeenCalledTimes(2);
     expect(pi.messages).toEqual([
       {
         customType: "codex-computer",
-        content: "Computer Use status: ready",
+        content: "Computer Use status: ready\n\nChrome status: ready",
         display: true,
       },
       {
         customType: "codex-computer",
-        content: "Computer Use status: ready",
+        content: "Computer Use status: ready\n\nChrome status: ready",
         display: true,
       },
     ]);
@@ -211,16 +277,16 @@ describe("ompCodexComputer", () => {
   it("defaults an empty command to status", async () => {
     const pi = createFakePi();
     const ctx = createCommandContext();
-    const { default: ompCodexComputer } = await import("../src/index");
     ompCodexComputer(pi as never);
     const command = pi.commands.get("codex-computer");
 
     await command?.handler("   ", ctx);
 
     expect(statusMock.checkComputerUseStatus).toHaveBeenCalledWith("/tmp/project");
+    expect(chromeStatusMock.checkChromeStatus).toHaveBeenCalledWith("/tmp/project");
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
-      content: "Computer Use status: ready",
+      content: "Computer Use status: ready\n\nChrome status: ready",
       display: true,
     });
     expect(JSON.stringify(pi.messages.at(-1))).not.toContain("Usage:");
