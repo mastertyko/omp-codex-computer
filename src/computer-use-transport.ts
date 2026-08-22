@@ -202,8 +202,10 @@ export class ComputerUseTransport {
     if (discovery) {
       ({ plugins, mcp } = discovery);
     } else {
-      plugins = await this.client.request<PluginListResponse>("plugin/list", {}, undefined, signal);
-      mcp = await this.client.request<McpServerStatusListResponse>("mcpServerStatus/list", {}, undefined, signal);
+      [plugins, mcp] = await Promise.all([
+        this.client.request<PluginListResponse>("plugin/list", {}, undefined, signal),
+        this.client.request<McpServerStatusListResponse>("mcpServerStatus/list", {}, undefined, signal),
+      ]);
     }
     const capabilities = evaluateCapabilitiesForDirectServer(plugins, mcp, this.directMcpServerName);
 
@@ -603,6 +605,20 @@ function readSkyErrorDetails(value: unknown): SkyErrorDetails {
   return details;
 }
 
+function summarizeSkyAppList(value: unknown[]): Record<string, unknown>[] {
+  const apps: Record<string, unknown>[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim()) continue;
+
+    const app: Record<string, unknown> = { id: entry.id.trim() };
+    if (typeof entry.displayName === "string") app.displayName = entry.displayName;
+    if (typeof entry.isRunning === "boolean") app.isRunning = entry.isRunning;
+    apps.push(app);
+  }
+  return apps;
+}
+
+
 function normalizeSkyResponse(
   tool: ComputerUseMcpToolName,
   envelope: SkySuccessEnvelope,
@@ -612,9 +628,10 @@ function normalizeSkyResponse(
     if (!Array.isArray(envelope.result)) {
       throw new SkyComputerUseProtocolError("Sky list_apps returned a non-array result");
     }
+    const modelVisibleApps = summarizeSkyAppList(envelope.result);
     return withMeta({
       route: "sky",
-      content: [{ type: "text", text: JSON.stringify(envelope.result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(modelVisibleApps, null, 2) }],
       structuredContent: envelope.result,
     }, response._meta);
   }

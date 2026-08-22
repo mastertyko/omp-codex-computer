@@ -547,6 +547,25 @@ describe("checkComputerUseStatus", () => {
     expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 
+  it("starts plugin and MCP status discovery concurrently after initialization", async () => {
+    const pluginDiscovery = Promise.withResolvers<PluginListResponse>();
+    const mcpDiscovery = Promise.withResolvers<McpServerStatusListResponse>();
+    mockState.clientRequest = async (method) => {
+      if (method === "initialize") return appServer;
+      if (method === "plugin/list") return pluginDiscovery.promise;
+      if (method === "mcpServerStatus/list") return mcpDiscovery.promise;
+      throw new Error(`unexpected method ${method}`);
+    };
+
+    const statusPromise = checkComputerUseStatus("/tmp/project");
+    await vi.waitFor(() => expect(mockState.clientEvents).toContain("plugin/list"));
+
+    expect(mockState.clientEvents).toContain("mcpServerStatus/list");
+    pluginDiscovery.resolve(plugins([{ name: "openai-bundled", plugin: plugin() }]));
+    mcpDiscovery.resolve(mcp());
+    await expect(statusPromise).resolves.toMatchObject({ reason: "ready", transportRoute: "direct" });
+  });
+
   it("observes Sky through thread creation and a real @oai/sky bootstrap without exposing probe payloads", async () => {
     const tree = await createSkyPluginTree();
     const pluginResponse = plugins([{
@@ -734,7 +753,12 @@ describe("checkComputerUseStatus", () => {
     expect(status.codexVersion).toBe("codex 1.2.3");
     expect(status.codexAppPath).toBe("/Applications/Codex.app");
     expect(status.error).toBe("plugin list exploded");
-    expect(mockState.clientEvents).toEqual(["initialize", "initialized", "plugin/list"]);
+    expect(mockState.clientEvents).toEqual([
+      "initialize",
+      "initialized",
+      "plugin/list",
+      "mcpServerStatus/list",
+    ]);
     expect(mockState.clientStop).toHaveBeenCalledTimes(1);
   });
 });
