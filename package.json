@@ -1,6 +1,6 @@
 {
   "name": "omp-codex-computer",
-  "version": "0.1.1",
+  "version": "0.1.17",
   "description": "OMP extension for OpenAI Codex Computer Use and first-party Chrome automation through Codex app-server",
   "repository": {
     "type": "git",
