@@ -388,6 +388,8 @@ function adaptSkyArguments(
       copySkyElementIndex(args, adapted, true);
       return adapted;
     }
+    case "paste":
+      return copyDefinedArguments(args, ["app", "format", "text"]);
   }
 }
 
@@ -486,6 +488,7 @@ function buildSkyDispatchSource(payloadLiteral: string): string {
       case "set_value": result = await sky.set_value(args); break;
       case "select_text": result = await sky.select_text(args); break;
       case "perform_secondary_action": result = await sky.perform_secondary_action(args); break;
+      case "paste": result = await sky.paste(args); break;
       default: throw new Error("Computer Use Sky payload named an unsupported tool");
     }
 
