@@ -91,11 +91,23 @@ export class ChromeRuntime {
 
   beginAgent(ctx: ExtensionContext): Promise<void> {
     return this.queue.enqueue(async () => {
-      if (this.state.kind !== "idle") {
-        throw new Error("Chrome already has an active or invalidated agent run");
+      const { cwd, sessionId } = readContextIdentity(ctx);
+
+      // OMP delivers lifecycle events for automatic continuations (auto-retry,
+      // todo/plan continuations, ...) without ordering guarantees: the next
+      // run's agent_start can arrive before -- or without -- the previous
+      // run's agent_end. A repeated start for the same OMP session and cwd is
+      // the same logical run continuing, so the active browser session (and
+      // its opaque identity) is kept. Any other non-idle state is a stale or
+      // invalidated run: finish it, then start fresh.
+      if (this.state.kind === "active") {
+        const { agent } = this.state;
+        if (agent.ompSessionId === sessionId && agent.cwd === cwd) return;
+        await this.finishStaleAgent();
+      } else if (this.state.kind !== "idle") {
+        await this.finishStaleAgent();
       }
 
-      const { cwd, sessionId } = readContextIdentity(ctx);
       this.initializePromise = undefined;
       this.transport.reset();
       this.threads.reset();
@@ -264,6 +276,19 @@ export class ChromeRuntime {
     this.state = { kind: "idle" };
 
     if (failure !== undefined) throw failure;
+  }
+
+  /**
+   * Finish a stale or invalidated run so a new agent_start can begin fresh.
+   * The stale run's cleanup failure is not the new run's failure: finishAgent
+   * has already invalidated all state before rethrowing.
+   */
+  private async finishStaleAgent(): Promise<void> {
+    try {
+      await this.finishAgent();
+    } catch {
+      // Swallowed: the new run must start regardless.
+    }
   }
 }
 
