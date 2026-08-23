@@ -32,7 +32,14 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
     await chromeRuntime.beginAgent(ctx);
   });
 
-  pi.on("agent_end", async () => {
+  pi.on("agent_end", async (event) => {
+    // A non-terminal settle: OMP has already scheduled an automatic
+    // continuation (auto-retry, todo/plan continuation, ...) whose
+    // agent_start races -- and can precede -- this event. The logical run
+    // keeps going, so both runtimes stay alive until the terminal settle.
+    // Read structurally: `willContinue` ships in newer OMP releases than
+    // this package's minimum peer version.
+    if ("willContinue" in event && event.willContinue === true) return;
     await Promise.all([computerRuntime.shutdown(), chromeRuntime.endAgent()]);
   });
 

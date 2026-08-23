@@ -161,12 +161,22 @@ describe("ompCodexComputer", () => {
     await pi.handlers.get("agent_start")?.[0]({ type: "agent_start" }, ctx);
     expect(chromeRuntime?.beginAgent).toHaveBeenCalledWith(ctx);
 
+    // Non-terminal settle: an automatic continuation is already scheduled,
+    // so neither runtime is torn down mid-logical-run.
+    await pi.handlers.get("agent_end")?.[0]({ type: "agent_end", willContinue: true }, ctx);
+    expect(computerRuntime?.shutdown).not.toHaveBeenCalled();
+    expect(chromeRuntime?.endAgent).not.toHaveBeenCalled();
+
     await pi.handlers.get("agent_end")?.[0]({ type: "agent_end" }, ctx);
     expect(computerRuntime?.shutdown).toHaveBeenCalledTimes(1);
     expect(chromeRuntime?.endAgent).toHaveBeenCalledTimes(1);
 
-    await pi.handlers.get("session_shutdown")?.[0]({ type: "session_shutdown" }, ctx);
+    await pi.handlers.get("agent_end")?.[0]({ type: "agent_end", willContinue: false }, ctx);
     expect(computerRuntime?.shutdown).toHaveBeenCalledTimes(2);
+    expect(chromeRuntime?.endAgent).toHaveBeenCalledTimes(2);
+
+    await pi.handlers.get("session_shutdown")?.[0]({ type: "session_shutdown" }, ctx);
+    expect(computerRuntime?.shutdown).toHaveBeenCalledTimes(3);
     expect(chromeRuntime?.shutdown).toHaveBeenCalledTimes(2);
   });
 

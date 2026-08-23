@@ -251,16 +251,46 @@ describe("ChromeRuntime agent lifecycle", () => {
     await runtime.endAgent();
   });
 
-  it("rejects overlapping agent starts without replacing the active identity", async () => {
-    const { runtime, transport } = createHarness();
+  it("reuses the active run when agent_start repeats for the same session and cwd", async () => {
+    const { runtime, threads, transport } = createHarness();
     const ctx = createContext();
 
     await runtime.beginAgent(ctx);
     await runtime.open(ctx);
     const identity = transport.executeCalls[0]?.identity;
-    await expect(runtime.beginAgent(ctx)).rejects.toThrow("active or invalidated");
+    const resetsAfterFirstBegin = {
+      threads: threads.resetCalls,
+      transport: transport.resetCalls,
+    };
+
+    // An automatic continuation's agent_start can be delivered before the
+    // previous run's agent_end; same session + cwd means the same logical
+    // run, so the browser session and identity survive.
+    await runtime.beginAgent(ctx);
     await runtime.observe(ctx);
     expect(transport.executeCalls[1]?.identity).toBe(identity);
+    expect(threads.resetCalls).toBe(resetsAfterFirstBegin.threads);
+    expect(transport.resetCalls).toBe(resetsAfterFirstBegin.transport);
+    await runtime.endAgent();
+  });
+
+  it("finishes a stale run and begins fresh when agent_start arrives for another session", async () => {
+    const { events, runtime, transport } = createHarness();
+    const firstContext = createContext("/work/project", "session-one");
+    const secondContext = createContext("/work/project", "session-two");
+
+    await runtime.beginAgent(firstContext);
+    await runtime.open(firstContext);
+    const firstIdentity = transport.executeCalls[0]?.identity;
+    events.length = 0;
+
+    await runtime.beginAgent(secondContext);
+    expect(events.slice(0, 2)).toEqual(["execute:cleanup", "stop"]);
+
+    await runtime.open(secondContext);
+    const secondIdentity = transport.executeCalls.at(-1)?.identity;
+    expect(secondIdentity).not.toEqual(firstIdentity);
+    await expect(runtime.open(firstContext)).rejects.toThrow("active OMP session");
     await runtime.endAgent();
   });
 });
@@ -373,14 +403,15 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     expect(transport.executeCalls).toHaveLength(1);
 
     await expect(runtime.observe(ctx)).rejects.toThrow("remainder of this agent run");
-    await expect(runtime.beginAgent(ctx)).rejects.toThrow("active or invalidated");
     expect(transport.executeCalls).toHaveLength(1);
 
-    await runtime.endAgent();
+    // The poisoned run stays unavailable, but the next agent_start is a new
+    // run and gets a fresh start with a new identity.
     transport.executeImpl = async () => RESULT;
     await runtime.beginAgent(ctx);
     await runtime.open(ctx);
     expect(transport.executeCalls).toHaveLength(2);
+    expect(transport.executeCalls[1]?.identity).not.toEqual(transport.executeCalls[0]?.identity);
     await runtime.endAgent();
   });
 
