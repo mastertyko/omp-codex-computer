@@ -520,8 +520,8 @@ describe("ComputerUseTransport", () => {
     expect(program.indexOf('phase = "dispatch"')).toBeGreaterThan(program.indexOf('await import("@oai/sky")'));
   });
 
-  it("preserves legacy direct calls when all ten public MCP tools are available", async () => {
-    expect(COMPUTER_USE_MCP_TOOL_NAMES).toHaveLength(10);
+  it("preserves legacy direct calls when all eleven public MCP tools are available", async () => {
+    expect(COMPUTER_USE_MCP_TOOL_NAMES).toHaveLength(11);
     const client = new FakeClient();
     client.mcpResponse = { data: [directServer()] };
     const structuredContent = { clicked: true };

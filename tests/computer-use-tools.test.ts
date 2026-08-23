@@ -49,6 +49,7 @@ describe("registerComputerUseTools", () => {
       "computer_use_set_value",
       "computer_use_select_text",
       "computer_use_perform_secondary_action",
+      "computer_use_paste",
       "computer_use_resolve_app",
     ]);
     expect(pi.tools.map((tool) => (tool as { name: string }).name)).toEqual(COMPUTER_USE_TOOL_NAMES);
@@ -66,6 +67,7 @@ describe("registerComputerUseTools", () => {
       "set_value",
       "select_text",
       "perform_secondary_action",
+      "paste",
     ]);
     expect(COMPUTER_USE_MCP_TOOL_NAMES).not.toContain("computer_use_resolve_app");
   });
@@ -189,5 +191,14 @@ describe("registerComputerUseTools", () => {
     expect(click.safeParse({ app: "Finder", element_index: "not-an-index" }).success).toBe(false);
     expect(click.safeParse({ app: "Finder", element_index: "1", click_count: 0 }).success).toBe(false);
     expect(click.safeParse({ app: "Finder", element_index: "1", click_count: 1.5 }).success).toBe(false);
+
+    const paste = getRegisteredTool(pi, "computer_use_paste").parameters;
+    expect(paste.safeParse({ app: "Notes", format: "text", text: "hello" }).success).toBe(true);
+    expect(paste.safeParse({ app: "Notes", format: "md", text: "# hello" }).success).toBe(true);
+    expect(paste.safeParse({ app: "Notes", format: "html", text: "<p>hello</p>" }).success).toBe(true);
+    expect(paste.safeParse({ app: "Notes", format: "rtf", text: "hello" }).success).toBe(false);
+    expect(paste.safeParse({ app: "Notes", text: "hello" }).success).toBe(false);
+    expect(paste.safeParse({ format: "text", text: "hello" }).success).toBe(false);
+    expect(paste.safeParse({ app: "Notes", format: "text" }).success).toBe(false);
   });
 });

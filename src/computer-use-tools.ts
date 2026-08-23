@@ -14,6 +14,7 @@ const COMPUTER_USE_UPSTREAM_TOOL_NAMES = [
   "computer_use_set_value",
   "computer_use_select_text",
   "computer_use_perform_secondary_action",
+  "computer_use_paste",
 ] as const;
 
 const COMPUTER_USE_LOCAL_TOOL_NAMES = ["computer_use_resolve_app"] as const;
@@ -97,6 +98,13 @@ const COMPUTER_USE_UPSTREAM_TOOLS = [
     mcpToolName: "perform_secondary_action",
     label: "Secondary Action",
     description: "Perform a secondary action such as a contextual click through Computer Use.",
+    approval: "write",
+  },
+  {
+    name: "computer_use_paste",
+    mcpToolName: "paste",
+    label: "Paste",
+    description: "Paste text, Markdown, or HTML into the current focus in an application through Computer Use, then restore the previous clipboard contents. Prefer this over typing for large or formatted content.",
     approval: "write",
   },
 ] as const satisfies ReadonlyArray<{
@@ -272,6 +280,11 @@ function createParameterSchemas(pi: ExtensionAPI): Record<ComputerUseToolName, u
       app,
       element_index: elementIndex,
       action: z.string().describe("The secondary action to perform."),
+    })),
+    computer_use_paste: allowUnknownProperties(z.object({
+      app,
+      format: z.enum(["text", "md", "html"]).describe("Content format: plain text, Markdown, or HTML."),
+      text: z.string().describe("The content to paste into the current focus."),
     })),
     computer_use_resolve_app: allowUnknownProperties(z.object({
       app: appTarget,

@@ -92,6 +92,7 @@ const REQUIRED_MCP_TOOL_NAMES = [
   "set_value",
   "select_text",
   "perform_secondary_action",
+  "paste",
 ] as const;
 
 const SKY_PLUGIN_ROOT = "/tmp/codex/plugins/computer-use";
@@ -164,6 +165,7 @@ const WORKING_SKY = {
   set_value: async () => null,
   select_text: async () => null,
   perform_secondary_action: async () => null,
+  paste: async () => null,
 };
 
 const BROKEN_SKY = { target: "mac" };
@@ -368,7 +370,7 @@ describe("evaluateComputerUseStatus", () => {
     expect(status.message).toContain("no transport route was observed");
   });
 
-  it("reports ready via direct MCP when all ten direct tools exist", () => {
+  it("reports ready via direct MCP when all eleven direct tools exist", () => {
     const status = evaluateComputerUseStatus({
       codexAppExists: true,
       appServer,
@@ -377,7 +379,7 @@ describe("evaluateComputerUseStatus", () => {
       transportRoute: "direct",
     });
 
-    expect(REQUIRED_MCP_TOOL_NAMES).toHaveLength(10);
+    expect(REQUIRED_MCP_TOOL_NAMES).toHaveLength(11);
     expect(status).toMatchObject({
       reason: "ready",
       transportRoute: "direct",
@@ -459,13 +461,14 @@ describe("evaluateComputerUseStatus", () => {
         "set_value",
         "select_text",
         "perform_secondary_action",
+        "paste",
       ],
       nodeReplMissingToolNames: ["js"],
     });
     expect(text).toContain("Computer Use status: mcp_incomplete");
     expect(text).toContain("Direct MCP tools: click, list_apps");
     expect(text).toContain("node_repl tools: inspect");
-    expect(text).toContain("Missing direct MCP tools: get_app_state, type_text, press_key, scroll, drag, set_value, select_text, perform_secondary_action");
+    expect(text).toContain("Missing direct MCP tools: get_app_state, type_text, press_key, scroll, drag, set_value, select_text, perform_secondary_action, paste");
     expect(text).toContain("Missing node_repl tools: js");
     expect(text).not.toContain("secret");
     expect(text).not.toContain("inputSchema");
@@ -480,7 +483,7 @@ describe("evaluateComputerUseStatus", () => {
       transportRoute: "direct",
     }));
 
-    expect(text).toContain("Direct MCP tools: click, debug_tool, drag, get_app_state, list_apps, perform_secondary_action, press_key, scroll, select_text, set_value, type_text");
+    expect(text).toContain("Direct MCP tools: click, debug_tool, drag, get_app_state, list_apps, paste, perform_secondary_action, press_key, scroll, select_text, set_value, type_text");
     expect(text).toContain("Additional upstream MCP tools not exposed by adapter: debug_tool");
   });
 });
