@@ -6,25 +6,32 @@ import type {
   PluginListResponse,
 } from "./protocol";
 
-export const CHROME_TRUST_ENV_VAR = "OMP_CODEX_CHROME_TRUST";
+import {
+  getTrustedAppServerVersions,
+  loadPersistedAppServerVersions,
+  SAFE_VERSION_PATTERN,
+} from "./chrome-trust";
 
-export interface ChromeTrustedTuple {
-  pluginVersion: string;
-  appServerVersion: string;
-}
-
-// The built-in allowlist only grows through the CONTRIBUTING review process:
-// contract review, focused compatibility tests, and a live open/action/close smoke.
-const BUILT_IN_TRUSTED_TUPLES: readonly ChromeTrustedTuple[] = Object.freeze([
-  Object.freeze({ pluginVersion: "26.818.31338", appServerVersion: "0.149.0" }),
+/**
+ * Client surface the generated program calls. A plugin update that drops any
+ * marker fails closed before bootstrap; the in-program shape handshake covers
+ * the rest at runtime. Names generic enough to appear in any bundle (goto,
+ * close, first, ...) carry no static signal and are checked only at runtime.
+ */
+export const CHROME_CLIENT_CONTRACT_MARKERS: readonly string[] = Object.freeze([
+  "setupBrowserRuntime",
+  "nameSession",
+  "domSnapshot",
+  "getByRole",
+  "getByText",
+  "getByLabel",
+  "getByPlaceholder",
+  "getByTestId",
+  "selectOption",
+  "setChecked",
 ]);
 
-export const SUPPORTED_CHROME_PLUGIN_VERSIONS: readonly string[] = Object.freeze(
-  [...new Set(BUILT_IN_TRUSTED_TUPLES.map((tuple) => tuple.pluginVersion))],
-);
-export const SUPPORTED_CHROME_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(
-  [...new Set(BUILT_IN_TRUSTED_TUPLES.map((tuple) => tuple.appServerVersion))],
-);
+const CLIENT_EXPORT_PATTERN = /export\s*(?:\{[^}]*\bsetupBrowserRuntime\b[^}]*\}|(?:async\s+)?function\s+setupBrowserRuntime\b|const\s+setupBrowserRuntime\b)/;
 
 const TRUSTED_MARKETPLACE_NAME = "openai-bundled";
 const CHROME_PLUGIN_ID = "chrome@openai-bundled";
@@ -34,12 +41,12 @@ const NODE_REPL_TOOL_NAME = "js";
 const CLIENT_RELATIVE_PATH = join("scripts", "browser-client.mjs");
 const MANIFEST_RELATIVE_PATH = join(".codex-plugin", "plugin.json");
 const MAX_MANIFEST_BYTES = 1024 * 1024;
-const SAFE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+const MAX_CLIENT_BYTES = 8 * 1024 * 1024;
 const APP_SERVER_USER_AGENT_PATTERN = /^omp-codex-computer\/([0-9A-Za-z][0-9A-Za-z.+-]{0,63})(?=$|[\s(])/;
 
 export type ChromeUnavailableReason =
   | "app_server_version_unavailable"
-  | "unsupported_version_tuple"
+  | "unsupported_app_server_version"
   | "marketplace_unavailable"
   | "plugin_unavailable"
   | "plugin_not_installed"
@@ -47,7 +54,8 @@ export type ChromeUnavailableReason =
   | "plugin_availability_unavailable"
   | "plugin_source_untrusted"
   | "node_repl_unavailable"
-  | "plugin_artifact_untrusted";
+  | "plugin_artifact_untrusted"
+  | "plugin_contract_mismatch";
 
 export interface ReadyChromeCapabilities {
   status: "ready";
@@ -95,7 +103,7 @@ type PluginSelection =
 
 const UNAVAILABLE_MESSAGES: Readonly<Record<ChromeUnavailableReason, string>> = Object.freeze({
   app_server_version_unavailable: "Chrome is unavailable because the Codex app-server version could not be verified.",
-  unsupported_version_tuple: "Chrome is unavailable because the installed app-server and Chrome plugin versions are not supported together. After your own contract review and live probe, OMP_CODEX_CHROME_TRUST can trust an additional plugin@app-server tuple.",
+  unsupported_app_server_version: "Chrome is unavailable because this Codex app-server version has not been validated. Run /codex-computer trust to contract-check and live-probe the installed stack and trust it on this machine, or set OMP_CODEX_CHROME_TRUST to a comma-separated list of app-server versions.",
   marketplace_unavailable: "Chrome is unavailable because the trusted bundled marketplace is missing or ambiguous.",
   plugin_unavailable: "Chrome is unavailable because the bundled Chrome plugin is missing or ambiguous.",
   plugin_not_installed: "Chrome is unavailable because the bundled Chrome plugin is not installed.",
@@ -104,56 +112,24 @@ const UNAVAILABLE_MESSAGES: Readonly<Record<ChromeUnavailableReason, string>> = 
   plugin_source_untrusted: "Chrome is unavailable because the bundled Chrome plugin source could not be trusted.",
   node_repl_unavailable: "Chrome is unavailable because node_repl/js is not available unambiguously.",
   plugin_artifact_untrusted: "Chrome is unavailable because the bundled Chrome plugin artifacts could not be trusted.",
+  plugin_contract_mismatch: "Chrome is unavailable because the installed Chrome plugin client no longer exposes the automation contract this extension validates. Update omp-codex-computer or report the mismatch.",
 });
-
-export function getTrustedChromeTuples(env: NodeJS.ProcessEnv = process.env): readonly ChromeTrustedTuple[] {
-  const raw = env[CHROME_TRUST_ENV_VAR];
-  if (typeof raw !== "string" || raw.trim().length === 0) return BUILT_IN_TRUSTED_TUPLES;
-
-  const tuples = [...BUILT_IN_TRUSTED_TUPLES];
-  const seen = new Set(tuples.map((tuple) => `${tuple.pluginVersion}@${tuple.appServerVersion}`));
-  for (const entry of raw.split(",")) {
-    const trimmed = entry.trim();
-    if (trimmed.length === 0) continue;
-    const parts = trimmed.split("@");
-    if (parts.length !== 2) continue;
-    const [pluginVersion, appServerVersion] = parts;
-    // Fail closed: malformed entries add no trust.
-    if (pluginVersion === undefined
-      || appServerVersion === undefined
-      || !SAFE_VERSION_PATTERN.test(pluginVersion)
-      || !SAFE_VERSION_PATTERN.test(appServerVersion)
-      || seen.has(trimmed)) {
-      continue;
-    }
-    seen.add(trimmed);
-    tuples.push({ pluginVersion, appServerVersion });
-  }
-  return tuples;
-}
-
-export function getTrustedChromeVersions(env: NodeJS.ProcessEnv = process.env): {
-  pluginVersions: string[];
-  appServerVersions: string[];
-} {
-  const tuples = getTrustedChromeTuples(env);
-  return {
-    pluginVersions: [...new Set(tuples.map((tuple) => tuple.pluginVersion))],
-    appServerVersions: [...new Set(tuples.map((tuple) => tuple.appServerVersion))],
-  };
-}
 
 export async function evaluateChromeCapabilities(
   initialize: InitializeResponse,
   plugins: PluginListResponse,
   mcp: McpServerStatusListResponse,
   env: NodeJS.ProcessEnv = process.env,
+  extraTrustedAppServerVersions: readonly string[] = [],
 ): Promise<ChromeCapabilities> {
-  const trustedTuples = getTrustedChromeTuples(env);
   const appServerVersion = extractAppServerVersion(initialize);
   if (!appServerVersion) return unavailable("app_server_version_unavailable");
-  if (!trustedTuples.some((tuple) => tuple.appServerVersion === appServerVersion)) {
-    return unavailable("unsupported_version_tuple");
+  const trustedVersions = getTrustedAppServerVersions(env, [
+    ...await loadPersistedAppServerVersions(env),
+    ...extraTrustedAppServerVersions,
+  ]);
+  if (!trustedVersions.includes(appServerVersion)) {
+    return unavailable("unsupported_app_server_version");
   }
 
   const selection = selectChromePlugin(plugins);
@@ -164,11 +140,11 @@ export async function evaluateChromeCapabilities(
   if (plugin.enabled !== true) return unavailable("plugin_disabled");
   if (plugin.availability !== "AVAILABLE") return unavailable("plugin_availability_unavailable");
 
+  // The plugin version is identity (manifest match, status display), not a
+  // gate: the artifact and contract checks below validate the actual client.
   const pluginVersion = plugin.localVersion;
-  if (typeof pluginVersion !== "string"
-    || !trustedTuples.some((tuple) =>
-      tuple.pluginVersion === pluginVersion && tuple.appServerVersion === appServerVersion)) {
-    return unavailable("unsupported_version_tuple");
+  if (typeof pluginVersion !== "string" || !SAFE_VERSION_PATTERN.test(pluginVersion)) {
+    return unavailable("plugin_artifact_untrusted");
   }
 
   const sourcePath = getTrustedLocalSourcePath(plugin.source);
@@ -177,6 +153,7 @@ export async function evaluateChromeCapabilities(
 
   const clientPath = await validatePluginArtifacts(sourcePath, pluginVersion);
   if (!clientPath) return unavailable("plugin_artifact_untrusted");
+  if (!await validateClientContract(clientPath)) return unavailable("plugin_contract_mismatch");
 
   return {
     status: "ready",
@@ -185,6 +162,24 @@ export async function evaluateChromeCapabilities(
     clientPath,
     nodeReplServerName: NODE_REPL_SERVER_NAME,
   };
+}
+
+/**
+ * Static tripwire over the proprietary client bundle: the export and every
+ * contract marker must be present. This is a pre-dispatch filter, not a
+ * security boundary — identity comes from the marketplace/manifest checks and
+ * behavior from the in-program shape handshake.
+ */
+async function validateClientContract(clientPath: string): Promise<boolean> {
+  let text: string;
+  try {
+    text = await readFile(clientPath, "utf8");
+  } catch {
+    return false;
+  }
+  if (Buffer.byteLength(text, "utf8") > MAX_CLIENT_BYTES) return false;
+  if (!CLIENT_EXPORT_PATTERN.test(text)) return false;
+  return CHROME_CLIENT_CONTRACT_MARKERS.every((marker) => text.includes(marker));
 }
 
 export function getChromeObservedVersions(

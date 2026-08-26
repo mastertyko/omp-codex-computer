@@ -194,6 +194,8 @@ export class ChromeTransport {
   constructor(
     private readonly client: Pick<AppServerClient, "request">,
     private readonly threads: Pick<CodexThreadManager, "getThread">,
+    /** Probe-only trust for /codex-computer trust; production wiring omits it. */
+    private readonly options: { extraTrustedAppServerVersions?: readonly string[] } = {},
   ) {}
 
   reset(): void {
@@ -288,7 +290,13 @@ export class ChromeTransport {
         this.client.request<McpServerStatusListResponse>("mcpServerStatus/list", {}, undefined, signal),
       ]);
       throwIfAborted(signal);
-      capabilities = await evaluateChromeCapabilities(initialize, plugins, mcp);
+      capabilities = await evaluateChromeCapabilities(
+        initialize,
+        plugins,
+        mcp,
+        process.env,
+        this.options.extraTrustedAppServerVersions ?? [],
+      );
     } catch (error) {
       throw sanitizeRequestError(error);
     }
@@ -359,6 +367,13 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
   };
+  const hasFns = (target, names) => (typeof target === "object" || typeof target === "function")
+    && target !== null
+    && names.every((name) => typeof target[name] === "function");
+  const tabContract = ["goto", "back", "forward", "reload", "close"];
+  const playwrightContract = ["getByRole", "getByText", "getByLabel", "getByPlaceholder", "getByTestId", "domSnapshot"];
+  const locatorContract = ["first", "waitFor", "count", "nth", "isVisible"];
+  const actionContract = { click: "click", fill: "fill", press: "press", select: "selectOption", check: "setChecked" };
   const hasExactKeys = (value, required, optional = []) => {
     if (!isRecord(value)) return false;
     const keys = Reflect.ownKeys(value);
@@ -516,6 +531,7 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
     }
   };
   const resolveSingleMatch = async (locator) => {
+    if (!hasFns(locator, locatorContract)) fail("unavailable");
     phase = "locate";
     let attached = true;
     try {
@@ -602,8 +618,11 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
       let browser;
       try {
         const { setupBrowserRuntime } = await import(${clientUrlLiteral});
+        if (typeof setupBrowserRuntime !== "function") throw new Error("client contract");
         const agentRuntime = await setupBrowserRuntime();
+        if (typeof agentRuntime?.browsers?.get !== "function") throw new Error("client contract");
         browser = await agentRuntime.browsers.get("chrome");
+        if (!hasFns(browser, ["nameSession"]) || !hasFns(browser?.tabs, ["new"])) throw new Error("client contract");
         await browser.nameSession("OMP Chrome");
       } catch {
         fail("unavailable");
@@ -615,15 +634,22 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
     if (operation.kind === "open") {
       if (session.tab !== null) fail("tab_already_open");
       phase = "open";
-      session.tab = await session.browser.tabs.new();
+      const tab = await session.browser.tabs.new();
+      if (!hasFns(tab, tabContract) || !hasFns(tab.playwright, playwrightContract)) {
+        // Deterministic post-open contract failure: release the fresh tab
+        // best-effort, then fail benign before any action can dispatch.
+        try { if (hasFns(tab, ["close"])) await tab.close(); } catch { /* best-effort close */ }
+        fail("unavailable");
+      }
+      session.tab = tab;
       if (operation.url === undefined) {
         writeEnvelope({ ok: true, result: { kind: "opened" } });
         return;
       }
       phase = "navigate";
-      await session.tab.goto(operation.url);
+      await tab.goto(operation.url);
       phase = "post_action_snapshot";
-      const opened = await takeSnapshot(session.tab.playwright);
+      const opened = await takeSnapshot(tab.playwright);
       writeEnvelope({ ok: true, result: capSnapshot(opened) });
       return;
     }
@@ -658,6 +684,8 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
       else await tab.reload();
     } else {
       const resolved = await resolveSingleMatch(createLocator(tab.playwright, action.target));
+      const actionFn = actionContract[action.kind];
+      if (actionFn === undefined || !hasFns(resolved, [actionFn])) fail("unavailable");
       phase = "action";
       switch (action.kind) {
         case "click":

@@ -2,9 +2,9 @@ import { AppServerClient } from "./app-server-client";
 import {
   evaluateChromeCapabilities,
   getChromeObservedVersions,
-  getTrustedChromeVersions,
   type ChromeUnavailableReason,
 } from "./chrome-capabilities";
+import { getTrustedAppServerVersions, loadPersistedAppServerVersions } from "./chrome-trust";
 import { CLIENT_INFO } from "./client-info";
 import type { InitializeResponse, McpServerStatusListResponse, PluginListResponse } from "./protocol";
 
@@ -14,14 +14,17 @@ export interface ChromeStatus {
   status: "ready" | "unavailable";
   reason: ChromeStatusReason;
   message: string;
-  supportedPluginVersions: readonly string[];
-  supportedAppServerVersions: readonly string[];
+  trustedAppServerVersions: readonly string[];
   observedPluginVersions: string[];
   observedAppServerVersion?: string;
 }
 
 export async function checkChromeStatus(cwd: string): Promise<ChromeStatus> {
   void cwd;
+  const trustedAppServerVersions = getTrustedAppServerVersions(
+    process.env,
+    await loadPersistedAppServerVersions(process.env),
+  );
   const client = new AppServerClient({ requestTimeoutMs: 60_000 });
   let initialize: InitializeResponse | undefined;
   let plugins: PluginListResponse | undefined;
@@ -48,6 +51,7 @@ export async function checkChromeStatus(cwd: string): Promise<ChromeStatus> {
         status: "ready",
         reason: "ready",
         message: "Chrome transport compatibility is verified; connection is checked when chrome_open runs.",
+        trustedAppServerVersions,
         observedAppServerVersion: versions.appServerVersion,
         observedPluginVersions: versions.pluginVersions,
       });
@@ -57,6 +61,7 @@ export async function checkChromeStatus(cwd: string): Promise<ChromeStatus> {
       status: "unavailable",
       reason: capabilities.reason,
       message: capabilities.message,
+      trustedAppServerVersions,
       observedAppServerVersion: versions.appServerVersion,
       observedPluginVersions: versions.pluginVersions,
     });
@@ -66,6 +71,7 @@ export async function checkChromeStatus(cwd: string): Promise<ChromeStatus> {
       status: "unavailable",
       reason: "check_failed",
       message: "Chrome status check failed while talking to Codex app-server.",
+      trustedAppServerVersions,
       observedAppServerVersion: versions.appServerVersion,
       observedPluginVersions: versions.pluginVersions,
     });
@@ -80,10 +86,9 @@ export function formatChromeStatus(status: ChromeStatus): string {
     `Reason: ${status.reason}`,
     status.message,
     "",
-    `Supported Chrome plugin versions: ${formatVersions(status.supportedPluginVersions)}`,
-    `Observed Chrome plugin versions: ${formatVersions(status.observedPluginVersions)}`,
-    `Supported Codex app-server versions: ${formatVersions(status.supportedAppServerVersions)}`,
+    `Trusted Codex app-server versions: ${formatVersions(status.trustedAppServerVersions)}`,
     `Observed Codex app-server version: ${status.observedAppServerVersion ?? "unknown"}`,
+    `Observed Chrome plugin versions: ${formatVersions(status.observedPluginVersions)}`,
   ].join("\n");
 }
 
@@ -91,16 +96,15 @@ function createStatus(input: {
   status: "ready" | "unavailable";
   reason: ChromeStatusReason;
   message: string;
+  trustedAppServerVersions: readonly string[];
   observedPluginVersions: string[];
   observedAppServerVersion?: string;
 }): ChromeStatus {
-  const trusted = getTrustedChromeVersions();
   return {
     status: input.status,
     reason: input.reason,
     message: input.message,
-    supportedPluginVersions: trusted.pluginVersions,
-    supportedAppServerVersions: trusted.appServerVersions,
+    trustedAppServerVersions: input.trustedAppServerVersions,
     observedPluginVersions: input.observedPluginVersions,
     ...(input.observedAppServerVersion
       ? { observedAppServerVersion: input.observedAppServerVersion }

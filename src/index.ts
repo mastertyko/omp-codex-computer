@@ -3,13 +3,15 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-
 import { CHROME_TOOL_NAMES, registerChromeTools } from "./chrome-tools";
 import { ChromeRuntime } from "./chrome-runtime";
 import { checkChromeStatus, formatChromeStatus } from "./chrome-status";
+import { runChromeTrustProbe } from "./chrome-trust-probe";
+import { clearPersistedAppServerVersions } from "./chrome-trust";
 import { COMPUTER_USE_TOOL_NAMES, registerComputerUseTools } from "./computer-use-tools";
 import { ComputerUseRuntime } from "./runtime";
 import { checkComputerUseStatus, formatComputerUseStatus } from "./status";
 
 const SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url));
 const COMMAND_NAME = "codex-computer";
-const COMMANDS = ["status", "diagnose", "enable", "disable", "restart", "hide-status", "show-status"] as const;
+const COMMANDS = ["status", "diagnose", "trust", "enable", "disable", "restart", "hide-status", "show-status"] as const;
 
 export default function ompCodexComputer(pi: ExtensionAPI): void {
   const computerRuntime = new ComputerUseRuntime();
@@ -68,6 +70,19 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
           ctx,
           `${formatComputerUseStatus(computerStatus)}\n\n${formatChromeStatus(chromeStatus)}`,
         );
+        return;
+      }
+
+      if (command === "trust") {
+        const argument = args.trim().slice(command.length).trim();
+        if (argument === "clear") {
+          const path = await clearPersistedAppServerVersions();
+          sendCommandMessage(pi, ctx, path === undefined
+            ? "No usable HOME or XDG_CONFIG_HOME; no persisted Chrome trust to clear."
+            : `Cleared persisted Chrome app-server trust at ${path}.`);
+          return;
+        }
+        sendCommandMessage(pi, ctx, await runChromeTrustProbe(ctx.cwd));
         return;
       }
 
