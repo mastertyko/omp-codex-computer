@@ -3,14 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  SUPPORTED_CHROME_APP_SERVER_VERSIONS,
-  SUPPORTED_CHROME_PLUGIN_VERSIONS,
+  CHROME_CLIENT_CONTRACT_MARKERS,
   evaluateChromeCapabilities,
-  getTrustedChromeTuples,
-  getTrustedChromeVersions,
   type ChromeCapabilities,
   type ChromeUnavailableReason,
 } from "../src/chrome-capabilities";
+import { BUILT_IN_TRUSTED_APP_SERVER_VERSIONS } from "../src/chrome-trust";
 import type {
   InitializeResponse,
   McpServerStatus,
@@ -22,6 +20,11 @@ import type {
 
 const CHROME_VERSION = "26.818.31338";
 const APP_SERVER_VERSION = "0.149.0";
+const CLIENT_FIXTURE = [
+  "export function setupBrowserRuntime() {}",
+  ...CHROME_CLIENT_CONTRACT_MARKERS.map((marker) => `// ${marker}`),
+  "",
+].join("\n");
 const tempRoots: string[] = [];
 
 interface PluginTree {
@@ -32,6 +35,7 @@ interface PluginTree {
 
 async function createPluginTree(
   manifest: unknown = { name: "chrome", version: CHROME_VERSION },
+  client: string = CLIENT_FIXTURE,
 ): Promise<PluginTree> {
   const root = await mkdtemp(join(tmpdir(), "omp-chrome-capabilities-"));
   tempRoots.push(root);
@@ -42,7 +46,7 @@ async function createPluginTree(
     mkdir(join(root, ".codex-plugin"), { recursive: true }),
   ]);
   await Promise.all([
-    writeFile(clientPath, "export function setupBrowserRuntime() {}\n"),
+    writeFile(clientPath, client),
     writeFile(manifestPath, JSON.stringify(manifest)),
   ]);
   return { root, clientPath, manifestPath };
@@ -97,11 +101,24 @@ function mcp(servers: McpServerStatus[] = [server("node_repl", ["js"])]): McpSer
   return { data: servers };
 }
 
+// Every call passes an explicit env so the developer machine's real
+// OMP_CODEX_CHROME_TRUST or persisted trust store never leaks into a test.
+function evaluate(
+  init: InitializeResponse,
+  plugins: PluginListResponse,
+  servers: McpServerStatusListResponse,
+  env: NodeJS.ProcessEnv = {},
+  extraTrusted: readonly string[] = [],
+): Promise<ChromeCapabilities> {
+  return evaluateChromeCapabilities(init, plugins, servers, env, extraTrusted);
+}
+
 function expectUnavailable(result: ChromeCapabilities, reason: ChromeUnavailableReason): void {
   expect(result.status).toBe("unavailable");
-  if (result.status !== "unavailable") throw new Error("Expected unavailable Chrome capabilities");
-  expect(result.reason).toBe(reason);
-  expect(result.message).toMatch(/^Chrome is unavailable /);
+  if (result.status === "unavailable") {
+    expect(result.reason).toBe(reason);
+    expect(result.message.length).toBeGreaterThan(0);
+  }
 }
 
 afterEach(async () => {
@@ -109,124 +126,100 @@ afterEach(async () => {
 });
 
 describe("evaluateChromeCapabilities", () => {
-  it("pins the only supported plugin and app-server versions", () => {
-    expect(SUPPORTED_CHROME_PLUGIN_VERSIONS).toEqual([CHROME_VERSION]);
-    expect(SUPPORTED_CHROME_APP_SERVER_VERSIONS).toEqual([APP_SERVER_VERSION]);
-    expect(Object.isFrozen(SUPPORTED_CHROME_PLUGIN_VERSIONS)).toBe(true);
-    expect(Object.isFrozen(SUPPORTED_CHROME_APP_SERVER_VERSIONS)).toBe(true);
+  it("pins the built-in trusted app-server versions", () => {
+    expect(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS).toEqual([APP_SERVER_VERSION]);
+    expect(Object.isFrozen(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS)).toBe(true);
   });
 
-  it("accepts only the trusted exact tuple, local artifacts, manifest, and node_repl/js", async () => {
+  it.each([CHROME_VERSION, "27.101.55555"])(
+    "accepts any plugin version (%s) whose artifacts pass the contract check",
+    async (pluginVersion) => {
+      const tree = await createPluginTree({ name: "chrome", version: pluginVersion });
+
+      const result = await evaluate(
+        initialize(),
+        pluginList(tree.root, { localVersion: pluginVersion }),
+        mcp(),
+      );
+
+      expect(result).toEqual({
+        status: "ready",
+        pluginVersion,
+        appServerVersion: APP_SERVER_VERSION,
+        clientPath: await realpath(tree.clientPath),
+        nodeReplServerName: "node_repl",
+      });
+    },
+  );
+
+  it("trusts additional app-server versions from OMP_CODEX_CHROME_TRUST", async () => {
+    const tree = await createPluginTree();
+    const env = { OMP_CODEX_CHROME_TRUST: " 0.150.0 , " };
+
+    const trusted = await evaluate(initialize("0.150.0"), pluginList(tree.root), mcp(), env);
+    expect(trusted).toMatchObject({ status: "ready", appServerVersion: "0.150.0" });
+
+    const builtIn = await evaluate(initialize(), pluginList(tree.root), mcp(), env);
+    expect(builtIn).toMatchObject({ status: "ready", appServerVersion: APP_SERVER_VERSION });
+  });
+
+  it("trusts probe-only extra versions without widening env or persisted trust", async () => {
     const tree = await createPluginTree();
 
-    const result = await evaluateChromeCapabilities(initialize(), pluginList(tree.root), mcp());
+    const withExtra = await evaluate(initialize("0.151.0"), pluginList(tree.root), mcp(), {}, ["0.151.0"]);
+    expect(withExtra).toMatchObject({ status: "ready", appServerVersion: "0.151.0" });
 
-    expect(result).toEqual({
-      status: "ready",
-      pluginVersion: CHROME_VERSION,
-      appServerVersion: APP_SERVER_VERSION,
-      clientPath: await realpath(tree.clientPath),
-      nodeReplServerName: "node_repl",
-    });
+    const withoutExtra = await evaluate(initialize("0.151.0"), pluginList(tree.root), mcp(), {});
+    expectUnavailable(withoutExtra, "unsupported_app_server_version");
   });
 
-  it("trusts additional exact tuples from OMP_CODEX_CHROME_TRUST", async () => {
-    const newPlugin = "26.900.40000";
-    const newAppServer = "0.150.0";
-    const tree = await createPluginTree({ name: "chrome", version: newPlugin });
-    const env = { OMP_CODEX_CHROME_TRUST: ` ${newPlugin}@${newAppServer} , ` };
-
-    const trusted = await evaluateChromeCapabilities(
-      initialize(newAppServer),
-      pluginList(tree.root, { localVersion: newPlugin }),
-      mcp(),
-      env,
+  it("reads persisted app-server trust from the config store", async () => {
+    const configHome = await mkdtemp(join(tmpdir(), "omp-chrome-trust-"));
+    tempRoots.push(configHome);
+    await mkdir(join(configHome, "omp-codex-computer"), { recursive: true });
+    await writeFile(
+      join(configHome, "omp-codex-computer", "trusted-app-servers.json"),
+      JSON.stringify({ appServerVersions: ["0.152.0"] }),
     );
-    expect(trusted).toMatchObject({ status: "ready", pluginVersion: newPlugin, appServerVersion: newAppServer });
+    const tree = await createPluginTree();
+    const env = { XDG_CONFIG_HOME: configHome };
 
-    const builtIn = await evaluateChromeCapabilities(
-      initialize(),
-      pluginList((await createPluginTree()).root),
-      mcp(),
-      env,
-    );
-    expect(builtIn).toMatchObject({ status: "ready", pluginVersion: CHROME_VERSION });
-  });
-
-  it("requires env trust to pair plugin and app-server versions exactly", async () => {
-    const newPlugin = "26.900.40000";
-    const tree = await createPluginTree({ name: "chrome", version: newPlugin });
-    const env = { OMP_CODEX_CHROME_TRUST: `${newPlugin}@0.150.0` };
-
-    // Env plugin with the built-in app-server version is a different, untrusted tuple.
-    const crossed = await evaluateChromeCapabilities(
-      initialize(),
-      pluginList(tree.root, { localVersion: newPlugin }),
-      mcp(),
-      env,
-    );
-    expectUnavailable(crossed, "unsupported_version_tuple");
-
-    // Built-in plugin with the env app-server version is equally untrusted.
-    const reversed = await evaluateChromeCapabilities(
-      initialize("0.150.0"),
-      pluginList((await createPluginTree()).root),
-      mcp(),
-      env,
-    );
-    expectUnavailable(reversed, "unsupported_version_tuple");
+    const trusted = await evaluate(initialize("0.152.0"), pluginList(tree.root), mcp(), env);
+    expect(trusted).toMatchObject({ status: "ready", appServerVersion: "0.152.0" });
   });
 
   it("ignores malformed trust entries without widening trust", async () => {
-    const tree = await createPluginTree({ name: "chrome", version: "26.900.40000" });
+    const tree = await createPluginTree();
     const malformed = [
-      "26.900.40000",
-      "26.900.40000@0.150.0@extra",
+      "26.900.40000@0.150.0",
       "@0.150.0",
-      "26.900.40000@",
-      "26.900.40000@0.150 .0",
-      "javascript:x@0.150.0",
+      "0.150 .0",
+      "javascript:x",
       "",
       "   ",
     ].join(",");
 
-    const result = await evaluateChromeCapabilities(
+    const result = await evaluate(
       initialize("0.150.0"),
-      pluginList(tree.root, { localVersion: "26.900.40000" }),
+      pluginList(tree.root),
       mcp(),
       { OMP_CODEX_CHROME_TRUST: malformed },
     );
-    expectUnavailable(result, "unsupported_version_tuple");
-
-    expect(getTrustedChromeTuples({ OMP_CODEX_CHROME_TRUST: malformed }))
-      .toEqual(getTrustedChromeTuples({}));
+    expectUnavailable(result, "unsupported_app_server_version");
   });
 
-  it("derives effective version lists for status display", () => {
-    expect(getTrustedChromeVersions({})).toEqual({
-      pluginVersions: [CHROME_VERSION],
-      appServerVersions: [APP_SERVER_VERSION],
-    });
-    expect(getTrustedChromeVersions({
-      OMP_CODEX_CHROME_TRUST: `26.900.40000@0.150.0,26.900.40000@0.150.0,${CHROME_VERSION}@${APP_SERVER_VERSION}`,
-    })).toEqual({
-      pluginVersions: [CHROME_VERSION, "26.900.40000"],
-      appServerVersions: [APP_SERVER_VERSION, "0.150.0"],
-    });
-  });
-
-  it("rejects an unverifiable or unsupported app-server version before trusting the plugin", async () => {
+  it("rejects an unverifiable or untrusted app-server version before touching the plugin", async () => {
     const tree = await createPluginTree();
 
-    const missing = await evaluateChromeCapabilities(
+    const missing = await evaluate(
       { ...initialize(), userAgent: "omp-codex-computer" },
       pluginList(tree.root),
       mcp(),
     );
-    const unsupported = await evaluateChromeCapabilities(initialize("0.150.0"), pluginList(tree.root), mcp());
+    const unsupported = await evaluate(initialize("0.150.0"), pluginList(tree.root), mcp());
 
     expectUnavailable(missing, "app_server_version_unavailable");
-    expectUnavailable(unsupported, "unsupported_version_tuple");
+    expectUnavailable(unsupported, "unsupported_app_server_version");
   });
 
   it("rejects a missing or duplicated openai-bundled marketplace", async () => {
@@ -241,8 +234,8 @@ describe("evaluateChromeCapabilities", () => {
       ],
     };
 
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), missing, mcp()), "marketplace_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), duplicated, mcp()), "marketplace_unavailable");
+    expectUnavailable(await evaluate(initialize(), missing, mcp()), "marketplace_unavailable");
+    expectUnavailable(await evaluate(initialize(), duplicated, mcp()), "marketplace_unavailable");
   });
 
   it("rejects duplicate and lookalike Chrome plugin identities", async () => {
@@ -262,10 +255,10 @@ describe("evaluateChromeCapabilities", () => {
       ],
     };
 
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), duplicate, mcp()), "plugin_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), wrongId, mcp()), "plugin_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), wrongName, mcp()), "plugin_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), thirdPartyLookalike, mcp()), "plugin_unavailable");
+    expectUnavailable(await evaluate(initialize(), duplicate, mcp()), "plugin_unavailable");
+    expectUnavailable(await evaluate(initialize(), wrongId, mcp()), "plugin_unavailable");
+    expectUnavailable(await evaluate(initialize(), wrongName, mcp()), "plugin_unavailable");
+    expectUnavailable(await evaluate(initialize(), thirdPartyLookalike, mcp()), "plugin_unavailable");
   });
 
   it.each([
@@ -275,21 +268,23 @@ describe("evaluateChromeCapabilities", () => {
   ] as const)("rejects a plugin that is %s", async (_label, overrides, reason) => {
     const tree = await createPluginTree();
 
-    const result = await evaluateChromeCapabilities(initialize(), pluginList(tree.root, overrides), mcp());
+    const result = await evaluate(initialize(), pluginList(tree.root, overrides), mcp());
 
     expectUnavailable(result, reason);
   });
 
-  it("rejects an unsupported plugin version", async () => {
-    const tree = await createPluginTree({ name: "chrome", version: "26.818.31339" });
+  it("rejects a missing or unsafe plugin version string as untrusted identity", async () => {
+    const tree = await createPluginTree();
 
-    const result = await evaluateChromeCapabilities(
+    const missing = await evaluate(initialize(), pluginList(tree.root, { localVersion: undefined }), mcp());
+    const pathShaped = await evaluate(
       initialize(),
-      pluginList(tree.root, { localVersion: "26.818.31339" }),
+      pluginList(tree.root, { localVersion: "/private/version-secret" }),
       mcp(),
     );
 
-    expectUnavailable(result, "unsupported_version_tuple");
+    expectUnavailable(missing, "plugin_artifact_untrusted");
+    expectUnavailable(pathShaped, "plugin_artifact_untrusted");
   });
 
   it.each([
@@ -300,7 +295,7 @@ describe("evaluateChromeCapabilities", () => {
   ] as const)("rejects a %s plugin source", async (_label, source) => {
     const tree = await createPluginTree();
 
-    const result = await evaluateChromeCapabilities(initialize(), pluginList(tree.root, { source }), mcp());
+    const result = await evaluate(initialize(), pluginList(tree.root, { source }), mcp());
 
     expectUnavailable(result, "plugin_source_untrusted");
     expect(JSON.stringify(result)).not.toContain(tree.root);
@@ -315,9 +310,9 @@ describe("evaluateChromeCapabilities", () => {
       tools: { js: { name: "javascript", inputSchema: {} } },
     }]);
 
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), pluginList(tree.root), missing), "node_repl_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), pluginList(tree.root), duplicate), "node_repl_unavailable");
-    expectUnavailable(await evaluateChromeCapabilities(initialize(), pluginList(tree.root), mismatchedTool), "node_repl_unavailable");
+    expectUnavailable(await evaluate(initialize(), pluginList(tree.root), missing), "node_repl_unavailable");
+    expectUnavailable(await evaluate(initialize(), pluginList(tree.root), duplicate), "node_repl_unavailable");
+    expectUnavailable(await evaluate(initialize(), pluginList(tree.root), mismatchedTool), "node_repl_unavailable");
   });
 
   it("rejects a missing or non-file browser client", async () => {
@@ -327,8 +322,8 @@ describe("evaluateChromeCapabilities", () => {
     await rm(nonFileTree.clientPath);
     await mkdir(nonFileTree.clientPath);
 
-    const missing = await evaluateChromeCapabilities(initialize(), pluginList(missingTree.root), mcp());
-    const nonFile = await evaluateChromeCapabilities(initialize(), pluginList(nonFileTree.root), mcp());
+    const missing = await evaluate(initialize(), pluginList(missingTree.root), mcp());
+    const nonFile = await evaluate(initialize(), pluginList(nonFileTree.root), mcp());
 
     expectUnavailable(missing, "plugin_artifact_untrusted");
     expectUnavailable(nonFile, "plugin_artifact_untrusted");
@@ -341,17 +336,59 @@ describe("evaluateChromeCapabilities", () => {
     await writeFile(malformed.manifestPath, "not json");
 
     expectUnavailable(
-      await evaluateChromeCapabilities(initialize(), pluginList(wrongName.root), mcp()),
+      await evaluate(initialize(), pluginList(wrongName.root), mcp()),
       "plugin_artifact_untrusted",
     );
     expectUnavailable(
-      await evaluateChromeCapabilities(initialize(), pluginList(wrongVersion.root), mcp()),
+      await evaluate(initialize(), pluginList(wrongVersion.root), mcp()),
       "plugin_artifact_untrusted",
     );
     expectUnavailable(
-      await evaluateChromeCapabilities(initialize(), pluginList(malformed.root), mcp()),
+      await evaluate(initialize(), pluginList(malformed.root), mcp()),
       "plugin_artifact_untrusted",
     );
+  });
+
+  it.each(CHROME_CLIENT_CONTRACT_MARKERS)(
+    "fails closed when the client no longer mentions contract marker %s",
+    async (marker) => {
+      const client = marker === "setupBrowserRuntime"
+        ? `export const bootstrap = 1;\n${CHROME_CLIENT_CONTRACT_MARKERS.filter((entry) => entry !== marker).join("\n")}\n`
+        : `export function setupBrowserRuntime() {}\n${CHROME_CLIENT_CONTRACT_MARKERS.filter((entry) => entry !== marker).join("\n")}\n`;
+      const tree = await createPluginTree({ name: "chrome", version: CHROME_VERSION }, client);
+
+      const result = await evaluate(initialize(), pluginList(tree.root), mcp());
+
+      expectUnavailable(result, "plugin_contract_mismatch");
+    },
+  );
+
+  it("fails closed when setupBrowserRuntime is present but never exported", async () => {
+    const client = `const setupBrowserRuntime = () => {};\n${CHROME_CLIENT_CONTRACT_MARKERS.join("\n")}\n`;
+    const tree = await createPluginTree({ name: "chrome", version: CHROME_VERSION }, client);
+
+    const result = await evaluate(initialize(), pluginList(tree.root), mcp());
+
+    expectUnavailable(result, "plugin_contract_mismatch");
+  });
+
+  it("accepts the minified export form used by the bundled client", async () => {
+    const client = `${CHROME_CLIENT_CONTRACT_MARKERS.join(";")};export{$x as setupBrowserRuntime};\n`;
+    const tree = await createPluginTree({ name: "chrome", version: CHROME_VERSION }, client);
+
+    const result = await evaluate(initialize(), pluginList(tree.root), mcp());
+
+    expect(result).toMatchObject({ status: "ready", clientPath: await realpath(tree.clientPath) });
+  });
+
+  it("fails closed on an oversized client bundle", async () => {
+    const padding = "//".padEnd(8 * 1024 * 1024, "x");
+    const client = `export function setupBrowserRuntime() {}\n${CHROME_CLIENT_CONTRACT_MARKERS.join("\n")}\n${padding}\n`;
+    const tree = await createPluginTree({ name: "chrome", version: CHROME_VERSION }, client);
+
+    const result = await evaluate(initialize(), pluginList(tree.root), mcp());
+
+    expectUnavailable(result, "plugin_contract_mismatch");
   });
 
   it("rejects a browser-client symlink that escapes the canonical plugin root", async () => {
@@ -359,11 +396,11 @@ describe("evaluateChromeCapabilities", () => {
     const outsideRoot = await mkdtemp(join(tmpdir(), "omp-chrome-outside-"));
     tempRoots.push(outsideRoot);
     const outsideClient = join(outsideRoot, "browser-client.mjs");
-    await writeFile(outsideClient, "export const compromised = true;\n");
+    await writeFile(outsideClient, CLIENT_FIXTURE);
     await rm(tree.clientPath);
     await symlink(outsideClient, tree.clientPath);
 
-    const result = await evaluateChromeCapabilities(initialize(), pluginList(tree.root), mcp());
+    const result = await evaluate(initialize(), pluginList(tree.root), mcp());
 
     expectUnavailable(result, "plugin_artifact_untrusted");
     expect(JSON.stringify(result)).not.toContain(tree.root);

@@ -40,6 +40,12 @@ const chromeStatusMock = vi.hoisted(() => ({
   checkChromeStatus: vi.fn(async () => ({ status: "ready", reason: "ready", message: "ok" })),
   formatChromeStatus: vi.fn(() => "Chrome status: ready"),
 }));
+const trustProbeMock = vi.hoisted(() => ({
+  runChromeTrustProbe: vi.fn(async () => "Chrome trust probe passed."),
+}));
+const trustStoreMock = vi.hoisted(() => ({
+  clearPersistedAppServerVersions: vi.fn(async (): Promise<string | undefined> => "/tmp/trusted-app-servers.json"),
+}));
 
 const { runtimeInstances, chromeRuntimeInstances } = runtimeMock;
 
@@ -51,6 +57,9 @@ vi.mock("../src/chrome-runtime", () => ({
 }));
 
 vi.mock("../src/chrome-status", () => chromeStatusMock);
+
+vi.mock("../src/chrome-trust-probe", () => trustProbeMock);
+vi.mock("../src/chrome-trust", () => trustStoreMock);
 
 vi.mock("../src/status", () => statusMock);
 
@@ -138,12 +147,44 @@ describe("ompCodexComputer", () => {
     expect(completions).toEqual([
       { value: "status ", label: "status" },
       { value: "diagnose ", label: "diagnose" },
+      { value: "trust ", label: "trust" },
       { value: "enable ", label: "enable" },
       { value: "disable ", label: "disable" },
       { value: "restart ", label: "restart" },
       { value: "hide-status ", label: "hide-status" },
       { value: "show-status ", label: "show-status" },
     ]);
+  });
+
+  it("runs the trust probe and clears persisted trust through the trust command", async () => {
+    const pi = createFakePi();
+    const ctx = createCommandContext();
+    ompCodexComputer(pi as never);
+    const command = pi.commands.get("codex-computer");
+
+    await command?.handler("trust", ctx);
+    expect(trustProbeMock.runChromeTrustProbe).toHaveBeenCalledWith("/tmp/project");
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Chrome trust probe passed.",
+      display: true,
+    });
+
+    await command?.handler("trust clear", ctx);
+    expect(trustStoreMock.clearPersistedAppServerVersions).toHaveBeenCalledTimes(1);
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "Cleared persisted Chrome app-server trust at /tmp/trusted-app-servers.json.",
+      display: true,
+    });
+
+    trustStoreMock.clearPersistedAppServerVersions.mockResolvedValueOnce(undefined);
+    await command?.handler("trust clear", ctx);
+    expect(pi.messages.at(-1)).toEqual({
+      customType: "codex-computer",
+      content: "No usable HOME or XDG_CONFIG_HOME; no persisted Chrome trust to clear.",
+      display: true,
+    });
   });
 
   it("binds Chrome to the agent lifecycle and keeps session cleanup isolated", async () => {

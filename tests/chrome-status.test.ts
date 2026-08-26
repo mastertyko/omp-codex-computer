@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CHROME_CLIENT_CONTRACT_MARKERS } from "../src/chrome-capabilities";
 import { checkChromeStatus, formatChromeStatus } from "../src/chrome-status";
 import type {
   InitializeResponse,
@@ -12,8 +13,13 @@ import type {
   PluginSummary,
 } from "../src/protocol";
 
-const CHROME_VERSION = "26.818.31338";
+const CHROME_VERSION = "26.818.61809";
 const APP_SERVER_VERSION = "0.149.0";
+const CLIENT_FIXTURE = [
+  "export function setupBrowserRuntime() {}",
+  ...CHROME_CLIENT_CONTRACT_MARKERS.map((marker) => `// ${marker}`),
+  "",
+].join("\n");
 
 const mockState = vi.hoisted(() => ({
   calls: [] as Array<{ method: string; params: unknown }>,
@@ -59,6 +65,7 @@ vi.mock("../src/app-server-client", () => ({
 }));
 
 let pluginRoot: string | undefined;
+let configHome: string | undefined;
 
 function initialize(version = APP_SERVER_VERSION): InitializeResponse {
   return {
@@ -125,12 +132,18 @@ beforeEach(async () => {
     mkdir(join(root, ".codex-plugin"), { recursive: true }),
   ]);
   await Promise.all([
-    writeFile(join(root, "scripts", "browser-client.mjs"), "export function setupBrowserRuntime() {}\n"),
+    writeFile(join(root, "scripts", "browser-client.mjs"), CLIENT_FIXTURE),
     writeFile(
       join(root, ".codex-plugin", "plugin.json"),
       JSON.stringify({ name: "chrome", version: CHROME_VERSION }),
     ),
   ]);
+
+  // Pin trust resolution to an empty temp store so the developer machine's
+  // real OMP_CODEX_CHROME_TRUST or persisted trust never leaks into a test.
+  configHome = await mkdtemp(join(tmpdir(), "omp-chrome-status-config-"));
+  vi.stubEnv("XDG_CONFIG_HOME", configHome);
+  vi.stubEnv("OMP_CODEX_CHROME_TRUST", "");
 
   mockState.initializeResponse = initialize();
   mockState.pluginResponse = plugins(root);
@@ -138,8 +151,11 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   if (pluginRoot) await rm(pluginRoot, { recursive: true, force: true });
   pluginRoot = undefined;
+  if (configHome) await rm(configHome, { recursive: true, force: true });
+  configHome = undefined;
 });
 
 describe("checkChromeStatus", () => {
@@ -150,8 +166,7 @@ describe("checkChromeStatus", () => {
       status: "ready",
       reason: "ready",
       message: "Chrome transport compatibility is verified; connection is checked when chrome_open runs.",
-      supportedPluginVersions: [CHROME_VERSION],
-      supportedAppServerVersions: [APP_SERVER_VERSION],
+      trustedAppServerVersions: [APP_SERVER_VERSION],
       observedPluginVersions: [CHROME_VERSION],
       observedAppServerVersion: APP_SERVER_VERSION,
     });
@@ -173,31 +188,48 @@ describe("checkChromeStatus", () => {
     expect(mockState.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("reports safe supported and observed versions without exposing any discovered path", async () => {
+  it("reports safe trusted and observed versions without exposing any discovered path", async () => {
     if (!pluginRoot) throw new Error("Expected a plugin fixture");
     mockState.initializeResponse = initialize("0.150.0");
-    mockState.pluginResponse = plugins(pluginRoot, { localVersion: "26.818.31339" });
 
     const status = await checkChromeStatus("/private/project-cwd");
     const formatted = formatChromeStatus(status);
 
     expect(status).toMatchObject({
       status: "unavailable",
-      reason: "unsupported_version_tuple",
-      supportedPluginVersions: [CHROME_VERSION],
-      supportedAppServerVersions: [APP_SERVER_VERSION],
-      observedPluginVersions: ["26.818.31339"],
+      reason: "unsupported_app_server_version",
+      trustedAppServerVersions: [APP_SERVER_VERSION],
+      observedPluginVersions: [CHROME_VERSION],
       observedAppServerVersion: "0.150.0",
     });
-    expect(formatted).toContain("Supported Chrome plugin versions: 26.818.31338");
-    expect(formatted).toContain("Observed Chrome plugin versions: 26.818.31339");
-    expect(formatted).toContain("Supported Codex app-server versions: 0.149.0");
+    expect(status.message).toContain("/codex-computer trust");
+    expect(formatted).toContain("Trusted Codex app-server versions: 0.149.0");
     expect(formatted).toContain("Observed Codex app-server version: 0.150.0");
+    expect(formatted).toContain(`Observed Chrome plugin versions: ${CHROME_VERSION}`);
     expect(formatted).not.toContain(pluginRoot);
     expect(formatted).not.toContain("/private/marketplace-path-that-must-not-leak");
     expect(formatted).not.toContain("/private/upstream-codex-home");
     expect(JSON.stringify(status)).not.toContain(pluginRoot);
     expect(mockState.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes persisted and env-trusted app-server versions in the trusted list", async () => {
+    if (!configHome) throw new Error("Expected a config fixture");
+    await mkdir(join(configHome, "omp-codex-computer"), { recursive: true });
+    await writeFile(
+      join(configHome, "omp-codex-computer", "trusted-app-servers.json"),
+      JSON.stringify({ appServerVersions: ["0.150.0"] }),
+    );
+    vi.stubEnv("OMP_CODEX_CHROME_TRUST", "0.151.0");
+    mockState.initializeResponse = initialize("0.150.0");
+
+    const status = await checkChromeStatus("/private/project-cwd");
+
+    expect(status).toMatchObject({
+      status: "ready",
+      trustedAppServerVersions: [APP_SERVER_VERSION, "0.150.0", "0.151.0"],
+      observedAppServerVersion: "0.150.0",
+    });
   });
 
   it("fails closed on an untrusted artifact without importing or calling the browser client", async () => {
@@ -221,6 +253,23 @@ describe("checkChromeStatus", () => {
     expect(mockState.stop).toHaveBeenCalledTimes(1);
   });
 
+  it("fails closed on a client that dropped the automation contract", async () => {
+    if (!pluginRoot) throw new Error("Expected a plugin fixture");
+    await writeFile(
+      join(pluginRoot, "scripts", "browser-client.mjs"),
+      "export function setupBrowserRuntime() {}\n// domSnapshot only\n",
+    );
+
+    const status = await checkChromeStatus("/private/project-cwd");
+
+    expect(status).toMatchObject({
+      status: "unavailable",
+      reason: "plugin_contract_mismatch",
+      observedPluginVersions: [CHROME_VERSION],
+    });
+    expect(status.message).toContain("Update omp-codex-computer");
+  });
+
   it("always stops its temporary client when initialization fails", async () => {
     mockState.failureMethod = "initialize";
     mockState.failure = new Error("initialize-secret /private/initialize-path");
@@ -231,8 +280,7 @@ describe("checkChromeStatus", () => {
       status: "unavailable",
       reason: "check_failed",
       message: "Chrome status check failed while talking to Codex app-server.",
-      supportedPluginVersions: [CHROME_VERSION],
-      supportedAppServerVersions: [APP_SERVER_VERSION],
+      trustedAppServerVersions: [APP_SERVER_VERSION],
       observedPluginVersions: [],
     });
     expect(JSON.stringify(status)).not.toContain("initialize-secret");
@@ -280,7 +328,7 @@ describe("checkChromeStatus", () => {
 
     expect(status).toMatchObject({
       status: "unavailable",
-      reason: "unsupported_version_tuple",
+      reason: "plugin_artifact_untrusted",
       observedPluginVersions: [],
     });
     expect(formatted).toContain("Observed Chrome plugin versions: unknown");

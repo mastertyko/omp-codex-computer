@@ -10,7 +10,7 @@ Local OMP extension that exposes OpenAI Codex Computer Use and a constrained fir
 - OMP installed
 - Accessibility and Screen Recording permissions granted when Codex Computer Use asks
 - Bundled `computer-use` Codex plugin available through app-server; this extension cannot operate without it
-- First-party Chrome support additionally requires Google Chrome, the official ChatGPT Chrome extension connected to the ChatGPT desktop app, bundled Chrome plugin `26.818.31338`, and Codex app-server `0.149.0`. Other tuples fail closed until explicitly validated. After your own contract review and live probe, additional `plugin@app-server` tuples can be trusted for a session with `OMP_CODEX_CHROME_TRUST` (comma-separated, e.g. `OMP_CODEX_CHROME_TRUST=26.900.40000@0.150.0`); malformed entries are ignored and add no trust, and `/codex-computer status` shows the effective allowlist.
+- First-party Chrome support additionally requires Google Chrome, the official ChatGPT Chrome extension connected to the ChatGPT desktop app, and a validated Codex app-server version (built-in allowlist: `0.149.0`). The bundled Chrome plugin is not version-pinned: any installed version is accepted as long as its identity, artifacts, and automation contract validate, and a plugin update that breaks the contract fails closed. An untrusted app-server version can be validated and persisted per machine with `/codex-computer trust`, or trusted per session with `OMP_CODEX_CHROME_TRUST` (comma-separated app-server versions, e.g. `OMP_CODEX_CHROME_TRUST=0.150.0`); malformed entries are ignored and add no trust, and `/codex-computer status` shows the effective allowlist.
 
 ## Installation
 
@@ -61,6 +61,7 @@ Use `omp plugin list` to confirm the plugin is no longer installed.
 
 - `/codex-computer status` — checks both native Computer Use routing and static Chrome transport compatibility. Chrome extension connectivity is checked only when `chrome_open` runs.
 - `/codex-computer diagnose` — prints the same detailed readiness and compatibility report.
+- `/codex-computer trust` — contract-checks the installed stack, live-probes it (open/observe/reload/close on `https://example.com/` plus cleanup), and persists the observed app-server version only after every step passes. `/codex-computer trust clear` removes the persisted trust store.
 - `/codex-computer enable` — enables both `computer_use_*` and `chrome_*` tools.
 - `/codex-computer disable` — disables both tool families and shuts down both runtimes.
 - `/codex-computer restart` — stops both dedicated app-server children; they reconnect on the next tool call.
@@ -142,3 +143,17 @@ Extended on 2026-08-23 with the `computer_use_paste` tool, same stack:
 - `bun run check` passed with 213 tests across 17 files.
 - A live `omp -e . -p` agent run activated TextEdit with `computer_use_get_app_state`, pasted through Sky with `computer_use_paste` (`format: "text"`), saved with `computer_use_press_key` (`Super_L+s`), and the follow-up app state showed the exact pasted value.
 - The saved document on disk contained exactly the pasted string, and a pre-activation `paste` was rejected upstream with the documented activation error and no side effects.
+
+Re-verified on 2026-08-26 after the bundled Chrome plugin auto-updated to `26.818.61809`, Codex CLI/app-server still 0.149.0:
+
+- The previous allowlist correctly failed closed with `unsupported_version_tuple` before the tuple review.
+- A static contract review of the new `browser-client.mjs` confirmed the unchanged surface the transport depends on: the single `setupBrowserRuntime` export, `browsers.get`, `nameSession`, `tabs.new`, `tab.playwright` semantic locators, and `domSnapshot`.
+- A live `ChromeRuntime` probe with `OMP_CODEX_CHROME_TRUST=26.818.61809@0.149.0` opened `https://example.com/`, observed, clicked the sole link through a role locator (post-action snapshot showed the navigation), closed the tab, and completed cleanup.
+- The tuple `26.818.61809@0.149.0` was then added to the built-in allowlist; `bun run check` passed with 215 tests across 17 files.
+
+Redesigned on 2026-08-26: the Chrome gate contract-validates the bundled plugin instead of pinning its version, and app-server trust is expandable without a release:
+
+- Plugin gate: the identity and artifact checks are unchanged; a static contract check over `browser-client.mjs` (single `setupBrowserRuntime` export plus every method marker the transport calls) and an in-program shape handshake before any tab or action replace the version pin. A contract-breaking plugin update fails closed as `plugin_contract_mismatch`.
+- App-server gate: exact built-in allowlist (`0.149.0`), expandable per machine via `/codex-computer trust` — which persists only after a green live probe — or per session via `OMP_CODEX_CHROME_TRUST`.
+- `bun run check` passed with 243 tests across 19 files; `npm pack --dry-run` completed successfully.
+- Live against Codex app-server 0.149.0 and bundled Chrome plugin 26.818.61809: the status probe reported `ready` through the contract gate with no version pin, a default-wired `ChromeRuntime` ran open → observe → role-locator click → close → cleanup green with the shape handshake active, and the trust probe ran open/observe/reload/close/cleanup green and correctly declined to persist the already-trusted version.

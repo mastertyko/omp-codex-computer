@@ -374,6 +374,42 @@ describe("ChromeTransport", () => {
     expect(program).toContain("setChecked(action.checked");
     expect(program).toContain("tab.back()");
     expect(program).toContain("tab.reload()");
+    expect(program).toContain("const hasFns = ");
+    expect(program).toContain("if (!hasFns(locator, locatorContract)) fail(\"unavailable\");");
+    expect(program).toContain("const actionFn = actionContract[action.kind];");
+    expect(program).toContain("if (actionFn === undefined || !hasFns(resolved, [actionFn])) fail(\"unavailable\");");
+    expect(program).toContain("if (!hasFns(tab, tabContract) || !hasFns(tab.playwright, playwrightContract))");
+    expect(program).toContain('if (typeof setupBrowserRuntime !== "function") throw new Error("client contract");');
+    expect(program).toContain('if (typeof agentRuntime?.browsers?.get !== "function") throw new Error("client contract");');
+  });
+
+  it("forwards probe-only extra trusted versions into capability evaluation", async () => {
+    evaluateChromeCapabilities.mockResolvedValue(readyCapabilities());
+    const client = new FakeClient();
+    const threads = new FakeThreads();
+    const transport = new ChromeTransport(client, threads, {
+      extraTrustedAppServerVersions: ["0.151.0"],
+    });
+
+    await transport.prepare("/work", initialize);
+
+    expect(evaluateChromeCapabilities).toHaveBeenLastCalledWith(
+      initialize,
+      undefined,
+      undefined,
+      process.env,
+      ["0.151.0"],
+    );
+
+    const bare = createTransport();
+    await bare.transport.prepare("/work", initialize);
+    expect(evaluateChromeCapabilities).toHaveBeenLastCalledWith(
+      initialize,
+      undefined,
+      undefined,
+      process.env,
+      [],
+    );
   });
 
   it("retries discovery after a failed prepare instead of pinning the rejection", async () => {
@@ -402,7 +438,7 @@ describe("ChromeTransport", () => {
     expect(client.calls.filter(({ method }) => method === "plugin/list")).toHaveLength(2);
     expect(threads.calls).toEqual(["/work", "/work"]);
 
-    evaluateChromeCapabilities.mockResolvedValueOnce({ status: "unavailable", reason: "unsupported_version_tuple", message: "Chrome is unavailable" });
+    evaluateChromeCapabilities.mockResolvedValueOnce({ status: "unavailable", reason: "unsupported_app_server_version", message: "Chrome is unavailable" });
     const unavailable = createTransport();
     await expect(unavailable.transport.prepare("/work", initialize)).rejects.toMatchObject({
       code: "unavailable", message: "Chrome is unavailable",

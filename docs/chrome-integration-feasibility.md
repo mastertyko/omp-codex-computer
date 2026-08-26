@@ -43,20 +43,15 @@ The Chrome runtime is deliberately separate from `ComputerUseRuntime`. This prev
 
 `agent_end` first sends an explicit cleanup operation with the same opaque session/turn identity. Cleanup closes any remaining tab, removes the session, and then stops the child process. Failures are split into two classes. Benign failures are proven side-effect free — validation rejections, tab-state errors (`tab_not_open`, `tab_already_open`), locator prechecks (`element_not_found`, `ambiguous_locator`), failed GET navigations (`navigation_failed`), bootstrap unavailability, failed pure reads (`snapshot_failed`, `snapshot_failed_after_action`), and a failed close of the agent-owned tab (`close_failed`, which retains the tab handle so close can be retried) — and leave the Chrome run usable so the agent can refine and continue. Every other failure — an abort, timeout, lost response, or invalid envelope once an action may have been dispatched — poisons the Chrome runtime for the rest of the agent run; the action is never replayed and never routed to Computer Use, CDP, or another browser.
 
-## Capability and version gate
+## Capability and contract gate
 
-The currently validated combination is:
+The gate splits by who controls the artifact and how it changes:
 
-- Codex app-server `0.149.0`.
-- Bundled `chrome@openai-bundled` `26.818.31338`.
-- Exactly one installed, enabled, and `AVAILABLE` Chrome plugin from the `openai-bundled` marketplace.
-- An absolute local plugin root that is a real directory, not a symlink.
-- A matching `.codex-plugin/plugin.json` and a real `scripts/browser-client.mjs` inside the canonical root.
-- Exactly one `node_repl` server advertising the tool `js` under that exact name.
+- **App-server: exact version allowlist.** The extension drives the experimental app-server API (`experimentalApi: true`), which carries no stability guarantee, and the user controls when the `codex` binary updates. The built-in allowlist (`0.149.0`) only grows through the review process in CONTRIBUTING. A user can extend it per machine with `/codex-computer trust` — a static gate check plus a live open/observe/action/close/cleanup probe; the observed version is persisted only after every probe step passes — or per session with `OMP_CODEX_CHROME_TRUST`, a comma-separated list of app-server versions. Malformed entries are ignored and add no trust.
+- **Chrome plugin: contract validation, not a version pin.** The bundled plugin auto-updates on OpenAI's date-based schedule and the previous artifact is deleted, so a version pin cannot keep anyone on a validated build — it can only turn every upstream release into downtime. Instead the gate requires: exactly one installed, enabled, and `AVAILABLE` Chrome plugin from the `openai-bundled` marketplace; an absolute local plugin root that is a real directory, not a symlink; a matching `.codex-plugin/plugin.json` and a real `scripts/browser-client.mjs` inside the canonical root; a static contract check over the client bundle (one `setupBrowserRuntime` export plus every method marker the generated program calls); and exactly one `node_repl` server advertising the tool `js` under that exact name.
+- **Runtime shape handshake.** The generated program re-verifies the client at bootstrap (`setupBrowserRuntime`, `browsers.get`, `nameSession`, `tabs.new`), on tab creation (tab methods and `tab.playwright` locator factories plus `domSnapshot`, releasing the fresh tab best-effort on mismatch), and before each locator action (locator methods and the action-specific function). Every shape failure is a benign pre-dispatch `unavailable`; nothing is replayed.
 
-An unknown version, ambiguous marketplace/plugin/server, non-local source, missing file, manifest mismatch, or symlink escape yields `Chrome unavailable`. No alternative transport is attempted.
-
-Version trust is tuple-based: the built-in allowlist pairs each plugin version with the app-server version it was validated against. Users can extend it for a session with `OMP_CODEX_CHROME_TRUST`, a comma-separated list of `plugin@app-server` entries, after performing their own contract review and live probe. Malformed entries are ignored and add no trust, pairs are matched exactly (never cross-combined), and every other artifact check — canonical local root, manifest match, unambiguous `node_repl/js` — still applies to env-trusted tuples. The built-in list only grows through the review process in CONTRIBUTING.
+An untrusted app-server version, ambiguous marketplace/plugin/server, non-local source, missing file, manifest mismatch, contract mismatch, or symlink escape yields `Chrome unavailable`. No alternative transport is attempted.
 
 `/codex-computer status` only verifies this static contract. It does not bootstrap the browser service and therefore cannot prove that the Chrome extension is connected. The operational connection is first verified by `chrome_open`.
 
@@ -95,12 +90,28 @@ Observed locally against the same stack, on `https://www.selenium.dev/selenium/w
 7. A sporadic bridge failure (~7 s after bootstrap, roughly two of three runs) originally surfaced on pure reads; with benign classification and the single snapshot second attempt, three consecutive full smoke runs completed with no poisoned step.
 8. Close and agent cleanup completed with no tab left open.
 
+## Live verification 2026-08-26 (plugin auto-update to 26.818.61809)
+
+The bundled Chrome plugin auto-updated from `26.818.31338` to `26.818.61809` (app-server still `0.149.0`), and the gate failed closed with `unsupported_version_tuple` as designed. Tuple review before expanding the allowlist:
+
+1. A static contract review of the new minified `browser-client.mjs` confirmed every surface the generated program depends on is unchanged: the single `setupBrowserRuntime` export, `agentRuntime.browsers.get`, `browser.nameSession`, `browser.tabs.new`, `tab.playwright` with `getByRole`/`getByText`/`getByLabel`/`getByPlaceholder`/`getByTestId`, `domSnapshot`, and locator `first`/`waitFor`/`count`/`nth`/`isVisible`/`click`/`fill`/`press`/`selectOption`/`setChecked` accepting `timeoutMs`.
+2. A live `ChromeRuntime` probe with `OMP_CODEX_CHROME_TRUST=26.818.61809@0.149.0` ran open (`https://example.com/`) → observe → role-locator click on the sole link (post-action snapshot showed the navigation) → close → agent cleanup, all green, no tab left open.
+3. The tuple `26.818.61809@0.149.0` was then added to the built-in allowlist alongside the original tuple.
+
+## Contract gate redesign 2026-08-26
+
+The tuple allowlist was replaced the same day: the plugin auto-update proved that a plugin version pin cannot prevent drift (the old artifact is deleted) and only guarantees downtime on every upstream release. Observed live against app-server `0.149.0` and plugin `26.818.61809`:
+
+1. The status probe reported `ready` through the contract gate with no plugin version pin; dropping any contract marker from a fixture client failed closed as `plugin_contract_mismatch`.
+2. A default-wired `ChromeRuntime` ran open → observe → role-locator click → close → cleanup green with the in-program shape handshake active.
+3. The trust probe (`/codex-computer trust` path) ran open/observe/reload/close/cleanup green with a probe-only trust override and correctly declined to persist the already-trusted version; nothing is written until every probe step passes.
+
 ## Remaining limitations
 
 - No listing or takeover of existing tabs.
 - No history enumeration, screenshots, upload/download, browser auth, or connector APIs.
 - No approval broker for first-party browser elicitations; such flows are denied.
-- Only strictly validated version combinations are supported by default. Every Codex/plugin update requires a new contract review and live probe before the built-in allowlist is expanded; `OMP_CODEX_CHROME_TRUST` lets a user accept that responsibility per session for additional tuples.
+- Only allowlisted app-server versions are trusted by default. `/codex-computer trust` validates and persists an additional version per machine after a green live probe; `OMP_CODEX_CHROME_TRUST` accepts that responsibility per session. A plugin update that drops part of the automation contract fails closed as `plugin_contract_mismatch` until the extension is updated.
 - Status is a compatibility check, not a connectivity check.
 - The bundled bridge clamps `waitFor` timeouts (observed ~5 s effective regardless of the requested `timeoutMs`), so slow-rendering pages can surface `element_not_found` earlier than the configured locator wait; the error is benign and an `chrome_observe` retry is safe.
 
@@ -109,4 +120,4 @@ Observed locally against the same stack, on `https://www.selenium.dev/selenium/w
 - OpenAI, [Use your computer with ChatGPT](https://learn.chatgpt.com/use-cases/use-your-computer-with-codex#choose-the-right-browser) — distinguishes desktop Computer Use from Chrome/browser tasks.
 - OpenAI, [Chrome extension](https://learn.chatgpt.com/docs/chrome-extension) — installation, website access, data, and security.
 - OpenAI Codex, [`McpServerToolCallParams.ts`](https://github.com/openai/codex/blob/343074d4207d572809bd8cea15f4be1d09d98e0b/codex-rs/app-server-protocol/schema/typescript/v2/McpServerToolCallParams.ts) — `_meta` on direct MCP calls.
-- Installed first-party artifact: `$HOME/.codex/plugins/cache/openai-bundled/chrome/26.818.31338/scripts/browser-client.mjs` and its matching plugin manifest. These proprietary files are version-bound and are not considered a stable public ABI.
+- Installed first-party artifact: `$HOME/.codex/plugins/cache/openai-bundled/chrome/<version>/scripts/browser-client.mjs` and its matching plugin manifest. These proprietary files are version-bound and are not considered a stable public ABI, which is why the gate validates their contract instead of pinning versions.
