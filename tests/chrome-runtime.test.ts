@@ -424,6 +424,7 @@ describe("ChromeRuntime cleanup and invalidation", () => {
       "invalid_request",
       "element_not_found",
       "ambiguous_locator",
+      "locate_failed",
       "navigation_failed",
       "snapshot_failed",
       "snapshot_failed_after_action",

@@ -75,6 +75,7 @@ export type ChromeTransportErrorCode =
   | "tab_not_open"
   | "element_not_found"
   | "ambiguous_locator"
+  | "locate_failed"
   | "navigation_failed"
   | "operation_failed"
   | "snapshot_failed"
@@ -82,6 +83,17 @@ export type ChromeTransportErrorCode =
   | "close_failed"
   | "interrupted"
   | "request_failed";
+
+export type ChromeProgramPhase =
+  | "validate"
+  | "setup"
+  | "open"
+  | "navigate"
+  | "locate"
+  | "action"
+  | "snapshot"
+  | "post_action_snapshot"
+  | "close";
 
 const CHROME_PROTOCOL = "omp-codex-computer/chrome-v1" as const;
 const NODE_REPL_EXECUTION_TIMEOUT_MS = 120_000;
@@ -108,6 +120,7 @@ const ERROR_MESSAGES: Readonly<Record<ChromeTransportErrorCode, string>> = Objec
   tab_not_open: "Chrome has no open agent tab",
   element_not_found: "Chrome found no element matching the locator; observe the page and refine the target",
   ambiguous_locator: "Chrome locator matched multiple elements; use a more specific target",
+  locate_failed: "Chrome could not resolve the locator; observe the page and try again",
   navigation_failed: "Chrome could not complete the navigation",
   operation_failed: "Chrome operation failed",
   snapshot_failed: "Chrome could not capture the page snapshot; observe again",
@@ -128,6 +141,7 @@ const ERROR_POISONS: Readonly<Record<ChromeTransportErrorCode, boolean>> = Objec
   tab_not_open: false,
   element_not_found: false,
   ambiguous_locator: false,
+  locate_failed: false,
   navigation_failed: false,
   operation_failed: true,
   snapshot_failed: false,
@@ -168,6 +182,7 @@ type ProgramErrorCode =
   | "tab_not_open"
   | "element_not_found"
   | "ambiguous_locator"
+  | "locate_failed"
   | "navigation_failed"
   | "operation_failed"
   | "snapshot_failed"
@@ -180,8 +195,9 @@ export class ChromeTransportError extends Error {
   constructor(
     readonly code: ChromeTransportErrorCode,
     message = ERROR_MESSAGES[code],
+    readonly phase?: ChromeProgramPhase,
   ) {
-    super(message);
+    super(phase === undefined ? message : `${message} (${phase} phase)`);
     this.name = code === "interrupted" ? "AbortError" : "ChromeTransportError";
     this.poisons = ERROR_POISONS[code];
   }
@@ -532,7 +548,6 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
   };
   const resolveSingleMatch = async (locator) => {
     if (!hasFns(locator, locatorContract)) fail("unavailable");
-    phase = "locate";
     let attached = true;
     try {
       await locator.first().waitFor({ state: "attached", timeoutMs: locatorWaitTimeoutMs });
@@ -683,6 +698,7 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
       else if (action.kind === "forward") await tab.forward();
       else await tab.reload();
     } else {
+      phase = "locate";
       const resolved = await resolveSingleMatch(createLocator(tab.playwright, action.target));
       const actionFn = actionContract[action.kind];
       if (actionFn === undefined || !hasFns(resolved, [actionFn])) fail("unavailable");
@@ -727,8 +743,10 @@ function buildChromeProgram(clientPath: string, payloadBase64: string): string {
               ? "close_failed"
               : phase === "post_action_snapshot"
                 ? "snapshot_failed_after_action"
-                : "operation_failed";
-    writeEnvelope({ ok: false, error: code });
+                : phase === "locate"
+                  ? "locate_failed"
+                  : "operation_failed";
+    writeEnvelope({ ok: false, error: code, phase });
   }
 })();`;
 }
@@ -758,11 +776,12 @@ function readChromeEnvelope(
   }
 
   if (envelope.ok === false) {
-    assertExactObject(envelope, ["protocol", "ok", "error"], "error envelope", "protocol_failed");
-    if (typeof envelope.error !== "string" || !isProgramErrorCode(envelope.error)) {
+    assertExactObject(envelope, ["protocol", "ok", "error", "phase"], "error envelope", "protocol_failed");
+    if (typeof envelope.error !== "string" || !isProgramErrorCode(envelope.error)
+      || typeof envelope.phase !== "string" || !isProgramPhase(envelope.phase)) {
       throw new ChromeTransportError("protocol_failed");
     }
-    throw new ChromeTransportError(envelope.error);
+    throw new ChromeTransportError(envelope.error, undefined, envelope.phase);
   }
 
   assertExactObject(envelope, ["protocol", "ok", "result"], "success envelope", "protocol_failed");
@@ -1084,11 +1103,24 @@ function isProgramErrorCode(value: string): value is ProgramErrorCode {
     || value === "tab_not_open"
     || value === "element_not_found"
     || value === "ambiguous_locator"
+    || value === "locate_failed"
     || value === "navigation_failed"
     || value === "operation_failed"
     || value === "snapshot_failed"
     || value === "snapshot_failed_after_action"
     || value === "close_failed";
+}
+
+function isProgramPhase(value: string): value is ChromeProgramPhase {
+  return value === "validate"
+    || value === "setup"
+    || value === "open"
+    || value === "navigate"
+    || value === "locate"
+    || value === "action"
+    || value === "snapshot"
+    || value === "post_action_snapshot"
+    || value === "close";
 }
 
 function sanitizeRequestError(error: unknown): ChromeTransportError {
