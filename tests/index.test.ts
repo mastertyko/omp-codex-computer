@@ -20,6 +20,7 @@ const runtimeMock = vi.hoisted(() => {
     beginAgent = vi.fn(async () => {});
     endAgent = vi.fn(async () => {});
     shutdown = vi.fn(async () => {});
+    restart = vi.fn(async () => {});
     open = vi.fn();
     observe = vi.fn();
     act = vi.fn();
@@ -256,12 +257,27 @@ describe("ompCodexComputer", () => {
     await command?.handler("restart", ctx);
 
     expect(runtimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
-    expect(chromeRuntimeInstances.at(-1)?.shutdown).toHaveBeenCalledTimes(1);
+    expect(chromeRuntimeInstances.at(-1)?.restart).toHaveBeenCalledTimes(1);
+    expect(chromeRuntimeInstances.at(-1)?.shutdown).not.toHaveBeenCalled();
     expect(pi.messages.at(-1)).toEqual({
       customType: "codex-computer",
       content: "Codex automation runtimes restarted. They will reconnect on the next tool call.",
       display: true,
     });
+  });
+
+  it("continues session setup when stale Chrome shutdown fails", async () => {
+    const pi = createFakePi();
+    ompCodexComputer(pi as never);
+    const chrome = chromeRuntimeInstances.at(-1);
+    const runtime = runtimeInstances.at(-1);
+    chrome?.shutdown.mockRejectedValueOnce(new Error("stale cleanup failure"));
+
+    const handler = pi.handlers.get("session_start")?.[0];
+    await handler?.({}, createCommandContext());
+
+    expect(runtime?.setContext).toHaveBeenCalledTimes(1);
+    expect(runtime?.resetSession).toHaveBeenCalledTimes(1);
   });
 
   it("hides and shows the footer status through the runtime command handlers", async () => {

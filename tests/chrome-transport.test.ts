@@ -261,6 +261,28 @@ describe("ChromeTransport", () => {
     expect(client.calls.filter(({ method }) => method === "mcpServer/tool/call")).toHaveLength(1);
   });
 
+  it("bounds every program execution and marks dispatch only after validation", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+    client.responses.push(success({ kind: "opened" }));
+    const dispatches: string[] = [];
+
+    await transport.execute("/work", identity, { kind: "open" }, undefined, () => dispatches.push("open"));
+    expect(dispatches).toEqual(["open"]);
+    expect(getToolCall(client).timeoutMs).toBe(150_000);
+
+    const invalid = { kind: "act", action: { kind: "click", target: { kind: "css", selector: "a" } } };
+    await expect(transport.execute("/work", identity, invalid as never, undefined, () => dispatches.push("invalid")))
+      .rejects.toMatchObject({ code: "invalid_request" });
+    expect(dispatches).toEqual(["open"]);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(transport.execute("/work", identity, { kind: "observe" }, controller.signal, () => dispatches.push("aborted")))
+      .rejects.toMatchObject({ code: "interrupted" });
+    expect(dispatches).toEqual(["open"]);
+  });
+
   it("accepts the extended finite action set and forwards it in the payload", async () => {
     const { client, transport } = createTransport();
     await transport.prepare("/work", initialize);

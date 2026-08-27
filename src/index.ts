@@ -5,6 +5,7 @@ import { ChromeRuntime } from "./chrome-runtime";
 import { checkChromeStatus, formatChromeStatus } from "./chrome-status";
 import { runChromeTrustProbe } from "./chrome-trust-probe";
 import { clearPersistedAppServerVersions } from "./chrome-trust";
+import { logDebug } from "./log";
 import { COMPUTER_USE_TOOL_NAMES, registerComputerUseTools } from "./computer-use-tools";
 import { ComputerUseRuntime } from "./runtime";
 import { checkComputerUseStatus, formatComputerUseStatus } from "./status";
@@ -24,7 +25,14 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
   pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIR] }));
 
   pi.on("session_start", async (_event, ctx) => {
-    await chromeRuntime.shutdown();
+    try {
+      await chromeRuntime.shutdown();
+    } catch (error) {
+      // A stale Chrome cleanup failure must not block Computer Use session setup.
+      logDebug("chrome.session-start.shutdown-error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     computerRuntime.setContext(ctx);
     computerRuntime.resetSession();
     await setCodexAutomationToolsEnabled(pi, toolsEnabled);
@@ -42,11 +50,11 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
     // Read structurally: `willContinue` ships in newer OMP releases than
     // this package's minimum peer version.
     if ("willContinue" in event && event.willContinue === true) return;
-    await Promise.all([computerRuntime.shutdown(), chromeRuntime.endAgent()]);
+    await settleAll([computerRuntime.shutdown(), chromeRuntime.endAgent()]);
   });
 
   pi.on("session_shutdown", async () => {
-    await Promise.all([computerRuntime.shutdown(), chromeRuntime.shutdown()]);
+    await settleAll([computerRuntime.shutdown(), chromeRuntime.shutdown()]);
   });
 
   pi.registerCommand(COMMAND_NAME, {
@@ -96,13 +104,13 @@ export default function ompCodexComputer(pi: ExtensionAPI): void {
       if (command === "disable") {
         toolsEnabled = false;
         await setCodexAutomationToolsEnabled(pi, false);
-        await Promise.all([computerRuntime.shutdown(), chromeRuntime.shutdown()]);
+        await settleAll([computerRuntime.shutdown(), chromeRuntime.shutdown()]);
         sendCommandMessage(pi, ctx, "Codex Computer Use and Chrome tools disabled.");
         return;
       }
 
       if (command === "restart") {
-        await Promise.all([computerRuntime.shutdown(), chromeRuntime.shutdown()]);
+        await settleAll([computerRuntime.shutdown(), chromeRuntime.restart()]);
         sendCommandMessage(pi, ctx, "Codex automation runtimes restarted. They will reconnect on the next tool call.");
         return;
       }
@@ -148,6 +156,15 @@ function sendCommandMessage(pi: ExtensionAPI, ctx: ExtensionCommandContext, cont
     content,
     display: true,
   });
+}
+
+/** Run independent cleanups to completion, then rethrow the first failure. */
+async function settleAll(operations: Array<Promise<unknown>>): Promise<void> {
+  const results = await Promise.allSettled(operations);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
 }
 
 

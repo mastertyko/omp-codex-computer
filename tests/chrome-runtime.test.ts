@@ -41,6 +41,7 @@ class FakeClient {
   initializeCalls = 0;
   stopCalls = 0;
   serverRequestHandler: ServerRequestHandler | undefined;
+  initializeImpl: (() => Promise<void>) | undefined;
 
   constructor(private readonly events: string[]) {}
 
@@ -61,6 +62,7 @@ class FakeClient {
     signal?: AbortSignal,
   ): Promise<TResult> {
     if (signal?.aborted) throw abortError();
+    if (this.initializeImpl) await this.initializeImpl();
     this.initializeCalls += 1;
     this.events.push(`${method}:${notificationMethod}`);
     this.running = true;
@@ -90,6 +92,8 @@ class FakeTransport {
   executeCalls: ExecuteCall[] = [];
   resetCalls = 0;
   executeImpl: (call: ExecuteCall) => Promise<ChromeResult> = async () => RESULT;
+  prepareImpl: (() => Promise<void>) | undefined;
+  dispatchOnExecute = true;
 
   constructor(private readonly events: string[]) {}
 
@@ -101,6 +105,7 @@ class FakeTransport {
   async prepare(cwd: string, initialize: InitializeResponse, signal?: AbortSignal): Promise<void> {
     this.prepareCalls.push({ cwd, initialize, signal });
     this.events.push("prepare");
+    if (this.prepareImpl) await this.prepareImpl();
   }
 
   async execute(
@@ -108,10 +113,12 @@ class FakeTransport {
     identity: ChromeTurnIdentity,
     operation: ChromeOperation,
     signal?: AbortSignal,
+    onDispatch?: () => void,
   ): Promise<ChromeResult> {
     const call = { cwd, identity, operation, signal };
     this.executeCalls.push(call);
     this.events.push(`execute:${operation.kind}`);
+    if (this.dispatchOnExecute) onDispatch?.();
     return this.executeImpl(call);
   }
 }
@@ -506,6 +513,89 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     await runtime.endAgent();
   });
 
+  it("keeps the run usable when initialize fails before dispatch", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+    let fail = true;
+    client.initializeImpl = async () => {
+      if (fail) throw new Error("spawn codex ENOENT /secret/local/path");
+    };
+
+    await runtime.beginAgent(ctx);
+    await expect(runtime.open(ctx)).rejects.toMatchObject({
+      code: "unavailable",
+      message: "Chrome is unavailable",
+    });
+    expect(client.stopCalls).toBe(0);
+    expect(transport.executeCalls).toHaveLength(0);
+
+    fail = false;
+    await expect(runtime.open(ctx)).resolves.toBe(RESULT);
+    await runtime.endAgent();
+  });
+
+  it("keeps the run usable when aborted during initialize", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+    const controller = new AbortController();
+    const initializeStarted = Promise.withResolvers<void>();
+    client.initializeImpl = () => {
+      initializeStarted.resolve();
+      const rejection = Promise.withResolvers<void>();
+      // The real initialize request rejects when its signal aborts.
+      controller.signal.addEventListener("abort", () => rejection.reject(abortError()), { once: true });
+      return rejection.promise;
+    };
+
+    await runtime.beginAgent(ctx);
+    const operation = runtime.open(ctx, undefined, controller.signal);
+    await initializeStarted.promise;
+    controller.abort();
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    expect(client.stopCalls).toBe(0);
+    expect(transport.executeCalls).toHaveLength(0);
+
+    client.initializeImpl = undefined;
+    await expect(runtime.observe(ctx)).resolves.toBe(RESULT);
+    await runtime.endAgent();
+  });
+
+  it("keeps the run usable when prepare fails before dispatch", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+    let fail = true;
+    transport.prepareImpl = async () => {
+      if (fail) throw new ChromeTransportError("protocol_failed");
+    };
+
+    await runtime.beginAgent(ctx);
+    await expect(runtime.open(ctx)).rejects.toMatchObject({ code: "protocol_failed" });
+    expect(client.stopCalls).toBe(0);
+    expect(transport.executeCalls).toHaveLength(0);
+
+    fail = false;
+    await expect(runtime.open(ctx)).resolves.toBe(RESULT);
+    await runtime.endAgent();
+  });
+
+  it("stays benign when the transport rejects before sending", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+    transport.dispatchOnExecute = false;
+    transport.executeImpl = async () => {
+      throw new ChromeTransportError("interrupted");
+    };
+
+    await runtime.beginAgent(ctx);
+    await expect(runtime.open(ctx)).rejects.toMatchObject({ code: "interrupted" });
+    expect(client.stopCalls).toBe(0);
+
+    transport.dispatchOnExecute = true;
+    transport.executeImpl = async () => RESULT;
+    await expect(runtime.open(ctx)).resolves.toBe(RESULT);
+    await runtime.endAgent();
+  });
+
   it("uses the same cleanup-before-stop barrier during shutdown", async () => {
     const { events, runtime } = createHarness();
     const ctx = createContext();
@@ -550,5 +640,49 @@ describe("ChromeRuntime context binding", () => {
     await expect(runtime.beginAgent(emptySession)).rejects.toThrow("active OMP session");
     await runtime.beginAgent(createContext());
     await runtime.endAgent();
+  });
+});
+
+describe("ChromeRuntime explicit restart", () => {
+  it("re-arms the active run with a fresh identity", async () => {
+    const { client, runtime, transport } = createHarness();
+    const ctx = createContext();
+
+    await runtime.beginAgent(ctx);
+    await runtime.open(ctx);
+    const firstIdentity = transport.executeCalls[0]?.identity;
+
+    await runtime.restart();
+    expect(client.stopCalls).toBe(1);
+    expect(transport.executeCalls.at(-1)?.operation.kind).toBe("cleanup");
+
+    await runtime.observe(ctx);
+    const secondIdentity = transport.executeCalls.at(-1)?.identity;
+    expect(secondIdentity?.sessionId).toMatch(UUID_PATTERN);
+    expect(secondIdentity).not.toEqual(firstIdentity);
+    await runtime.endAgent();
+  });
+
+  it("clears poison so the same OMP run can use Chrome again", async () => {
+    const { runtime, transport } = createHarness();
+    const ctx = createContext();
+    transport.executeImpl = async () => {
+      throw new ChromeTransportError("operation_failed");
+    };
+
+    await runtime.beginAgent(ctx);
+    await expect(runtime.open(ctx)).rejects.toMatchObject({ code: "operation_failed" });
+    await expect(runtime.observe(ctx)).rejects.toThrow("remainder of this agent run");
+
+    transport.executeImpl = async () => RESULT;
+    await runtime.restart();
+    await expect(runtime.observe(ctx)).resolves.toBe(RESULT);
+    await runtime.endAgent();
+  });
+
+  it("stays idle when restarted without an agent", async () => {
+    const { runtime } = createHarness();
+    await runtime.restart();
+    await expect(runtime.observe(createContext())).rejects.toThrow("active agent run");
   });
 });

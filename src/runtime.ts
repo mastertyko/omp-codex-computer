@@ -33,6 +33,8 @@ export class ComputerUseRuntime {
   private initializePromise: Promise<InitializeResponse> | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
   private shutdownPromise: Promise<void> | undefined;
+  /** Bumped by shutdown: stale queued calls must not resurrect the child. */
+  private epoch = 0;
   private statusVisible = getStatusVisibleByDefault();
   private statusValue = "idle";
 
@@ -68,6 +70,7 @@ export class ComputerUseRuntime {
 
   private async shutdownOnce(): Promise<void> {
     logDebug("runtime.shutdown");
+    this.epoch += 1;
     this.clearIdleTimer();
     this.initializePromise = undefined;
     this.backend.reset();
@@ -115,7 +118,8 @@ export class ComputerUseRuntime {
       : ctx;
 
     this.clearIdleTimer();
-    return this.callToolQueue.enqueue(() => this.callToolOnce(runtimeContext, tool, args));
+    const epoch = this.epoch;
+    return this.callToolQueue.enqueue(() => this.callToolOnce(runtimeContext, tool, args, epoch), contextSignal);
   }
 
   resolveAppTarget(ctx: ExtensionContext, app: string, signal?: AbortSignal): Promise<ComputerUseToolResult> {
@@ -127,10 +131,14 @@ export class ComputerUseRuntime {
       : ctx;
 
     this.clearIdleTimer();
-    return this.callToolQueue.enqueue(() => this.resolveAppTargetOnce(runtimeContext, app));
+    const epoch = this.epoch;
+    return this.callToolQueue.enqueue(() => this.resolveAppTargetOnce(runtimeContext, app, epoch), contextSignal);
   }
 
-  private async resolveAppTargetOnce(ctx: ExtensionContext, app: string): Promise<ComputerUseToolResult> {
+  private async resolveAppTargetOnce(ctx: ExtensionContext, app: string, epoch: number): Promise<ComputerUseToolResult> {
+    if (epoch !== this.epoch) {
+      throw createAbortError(`Aborted Computer Use app target resolution for ${app}: the runtime was shut down`);
+    }
     const signal = (ctx as ContextWithSignal).signal;
     this.setContext(ctx);
 
@@ -174,7 +182,11 @@ export class ComputerUseRuntime {
     ctx: ExtensionContext,
     tool: string,
     args: Record<string, unknown>,
+    epoch: number,
   ): Promise<ComputerUseToolResult> {
+    if (epoch !== this.epoch) {
+      throw createAbortError(`Aborted Computer Use tool call ${tool}: the runtime was shut down`);
+    }
     const signal = (ctx as ContextWithSignal).signal;
     this.setContext(ctx);
 
