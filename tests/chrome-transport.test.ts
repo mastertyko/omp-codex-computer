@@ -62,8 +62,8 @@ function success(result: unknown): { content: unknown[] } {
   return { content: [{ type: "text", text: JSON.stringify({ protocol: "omp-codex-computer/chrome-v1", ok: true, result }) }] };
 }
 
-function failure(error: string): { content: unknown[] } {
-  return { content: [{ type: "text", text: JSON.stringify({ protocol: "omp-codex-computer/chrome-v1", ok: false, error }) }] };
+function failure(error: string, phase: string): { content: unknown[] } {
+  return { content: [{ type: "text", text: JSON.stringify({ protocol: "omp-codex-computer/chrome-v1", ok: false, error, phase }) }] };
 }
 
 function createTransport() {
@@ -225,10 +225,25 @@ describe("ChromeTransport", () => {
     });
     await expect(transport.execute("/work", identity, { kind: "open" })).resolves.toEqual({ kind: "opened" });
 
-    client.responses.push(failure("operation_failed"));
+    client.responses.push(failure("operation_failed", "action"));
     await expect(transport.execute("/work", identity, { kind: "open" })).rejects.toMatchObject({
-      code: "operation_failed", message: "Chrome operation failed",
+      code: "operation_failed", message: "Chrome operation failed (action phase)", phase: "action",
     });
+  });
+
+  it("rejects error envelopes without a known program phase", async () => {
+    const { client, transport } = createTransport();
+    await transport.prepare("/work", initialize);
+
+    client.responses.push({ content: [{ type: "text", text: JSON.stringify({
+      protocol: "omp-codex-computer/chrome-v1", ok: false, error: "operation_failed",
+    }) }] });
+    await expect(transport.execute("/work", identity, { kind: "observe" }))
+      .rejects.toMatchObject({ code: "protocol_failed" });
+
+    client.responses.push(failure("operation_failed", "sneaky"));
+    await expect(transport.execute("/work", identity, { kind: "observe" }))
+      .rejects.toMatchObject({ code: "protocol_failed" });
   });
 
   it("propagates aborts and request errors without retry or fallback", async () => {
@@ -334,17 +349,22 @@ describe("ChromeTransport", () => {
   it("maps the new program error codes onto benign transport errors", async () => {
     const { client, transport } = createTransport();
     await transport.prepare("/work", initialize);
-    for (const code of ["element_not_found", "ambiguous_locator", "navigation_failed"] as const) {
-      client.responses.push(failure(code));
+    for (const [code, phase] of [
+      ["element_not_found", "locate"],
+      ["ambiguous_locator", "locate"],
+      ["locate_failed", "locate"],
+      ["navigation_failed", "navigate"],
+    ] as const) {
+      client.responses.push(failure(code, phase));
       await expect(transport.execute("/work", identity, { kind: "observe" }))
-        .rejects.toMatchObject({ code, poisons: false });
+        .rejects.toMatchObject({ code, poisons: false, phase });
     }
   });
 
   it("classifies poisoning versus benign codes on the error type", () => {
     const benign = [
       "unavailable", "invalid_request", "tab_already_open", "tab_not_open",
-      "element_not_found", "ambiguous_locator", "navigation_failed",
+      "element_not_found", "ambiguous_locator", "locate_failed", "navigation_failed",
       "snapshot_failed", "snapshot_failed_after_action", "close_failed",
     ] as const;
     const poisoning = ["not_prepared", "protocol_failed", "operation_failed", "interrupted", "request_failed"] as const;
@@ -381,6 +401,10 @@ describe("ChromeTransport", () => {
     expect(program).toContain("if (!hasFns(tab, tabContract) || !hasFns(tab.playwright, playwrightContract))");
     expect(program).toContain('if (typeof setupBrowserRuntime !== "function") throw new Error("client contract");');
     expect(program).toContain('if (typeof agentRuntime?.browsers?.get !== "function") throw new Error("client contract");');
+    expect(program).toContain('phase = "locate";');
+    expect(program.indexOf('phase = "locate";')).toBeLessThan(program.indexOf("resolveSingleMatch(createLocator"));
+    expect(program).toContain('? "locate_failed"');
+    expect(program).toContain("writeEnvelope({ ok: false, error: code, phase });");
   });
 
   it("forwards probe-only extra trusted versions into capability evaluation", async () => {
