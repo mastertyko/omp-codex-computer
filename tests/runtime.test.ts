@@ -379,6 +379,45 @@ describe("ComputerUseRuntime lifecycle", () => {
     await expect(second).resolves.toEqual({ content: [] });
   });
 
+  it("rejects stale queued calls after shutdown instead of resurrecting the child", async () => {
+    const firstResult = Promise.withResolvers<{ content: [] }>();
+    const backend = {
+      reset: vi.fn(),
+      calls: [] as string[],
+      callTool(_cwd: string, tool: string) {
+        this.calls.push(tool);
+        return firstResult.promise;
+      },
+    };
+    const client = {
+      isRunning: () => true,
+      requestWithNotification: vi.fn(async () => ({
+        userAgent: "test",
+        codexHome: "/tmp/codex",
+        platformFamily: "test",
+        platformOs: "test",
+      })),
+      stop: vi.fn(async () => undefined),
+      onServerRequest: () => undefined,
+    };
+    const runtime = new ComputerUseRuntime();
+    const runtimeInternals = runtime as unknown as { client: typeof client; backend: typeof backend };
+    runtimeInternals.client = client;
+    runtimeInternals.backend = backend;
+
+    const first = runtime.callTool(createContext("/tmp/project", async () => true), "inspect", { app: "First" });
+    await flushPromises();
+    const second = runtime.callTool(createContext("/tmp/project", async () => true), "inspect", { app: "Second" });
+    const shutdown = runtime.shutdown();
+
+    firstResult.resolve({ content: [] });
+    await expect(first).resolves.toEqual({ content: [] });
+    await shutdown;
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    expect(backend.calls).toEqual(["inspect"]);
+    expect(client.requestWithNotification).toHaveBeenCalledTimes(1);
+  });
+
   it("stops the client and returns to idle when the active tool signal aborts mid-call", async () => {
     const controller = new AbortController();
     const setStatus = vi.fn();

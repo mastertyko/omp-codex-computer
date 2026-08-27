@@ -97,6 +97,10 @@ export type ChromeProgramPhase =
 
 const CHROME_PROTOCOL = "omp-codex-computer/chrome-v1" as const;
 const NODE_REPL_EXECUTION_TIMEOUT_MS = 120_000;
+// Host-side response ceiling for program executions: the in-repl execution
+// timeout plus scheduling margin. Bounds cleanup (which has no AbortSignal)
+// and every dispatch against a wedged app-server child.
+const EXECUTE_REQUEST_TIMEOUT_MS = NODE_REPL_EXECUTION_TIMEOUT_MS + 30_000;
 const MAX_URL_LENGTH = 2048;
 const MAX_IDENTITY_BYTES = 128;
 const MAX_LOCATOR_BYTES = 1024;
@@ -253,6 +257,7 @@ export class ChromeTransport {
     identity: ChromeTurnIdentity,
     operation: ChromeOperation,
     signal?: AbortSignal,
+    onDispatch?: () => void,
   ): Promise<ChromeResult> {
     validateIdentity(identity);
     validateOperation(operation);
@@ -268,6 +273,9 @@ export class ChromeTransport {
     const payload = Buffer.from(JSON.stringify({ identity, operation }), "utf8").toString("base64");
     const program = buildChromeProgram(prepared.capabilities.clientPath, payload);
     let response: RawMcpToolCallResponse;
+    // From here the request may reach the child: the caller must treat the
+    // outcome as potentially dispatched.
+    onDispatch?.();
     try {
       response = await this.client.request<RawMcpToolCallResponse>("mcpServer/tool/call", {
         server: prepared.capabilities.nodeReplServerName,
@@ -286,7 +294,7 @@ export class ChromeTransport {
             request_kind: "turn",
           },
         },
-      }, 0, signal);
+      }, EXECUTE_REQUEST_TIMEOUT_MS, signal);
     } catch (error) {
       throw sanitizeRequestError(error);
     }

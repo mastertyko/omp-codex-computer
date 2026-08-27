@@ -33,4 +33,55 @@ describe("SerialQueue", () => {
     ).rejects.toThrow("boom");
     await expect(queue.enqueue(async () => "ok")).resolves.toBe("ok");
   });
+
+  it("rejects a queued task immediately on abort and skips it", async () => {
+    const queue = new SerialQueue();
+    const controller = new AbortController();
+    const firstGate = Promise.withResolvers<void>();
+    let secondRan = false;
+
+    const first = queue.enqueue(() => firstGate.promise);
+    const second = queue.enqueue(async () => {
+      secondRan = true;
+      return "never";
+    }, controller.signal);
+
+    controller.abort();
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+
+    firstGate.resolve();
+    await first;
+    await queue.enqueue(async () => undefined);
+    expect(secondRan).toBe(false);
+  });
+
+  it("delivers the task's own outcome once it has started", async () => {
+    const queue = new SerialQueue();
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const result = Promise.withResolvers<string>();
+
+    const task = queue.enqueue(() => {
+      started.resolve();
+      return result.promise;
+    }, controller.signal);
+    await started.promise;
+
+    controller.abort();
+    result.resolve("done");
+    await expect(task).resolves.toBe("done");
+  });
+
+  it("rejects an already-aborted enqueue without touching the queue", async () => {
+    const queue = new SerialQueue();
+    const controller = new AbortController();
+    controller.abort();
+    let ran = false;
+
+    await expect(queue.enqueue(async () => {
+      ran = true;
+    }, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(ran).toBe(false);
+    await expect(queue.enqueue(async () => "ok")).resolves.toBe("ok");
+  });
 });

@@ -52,7 +52,7 @@ type RuntimeState =
   | { kind: "idle" }
   | { kind: "active"; agent: ActiveAgent }
   | { kind: "ending" }
-  | { kind: "poisoned" };
+  | { kind: "poisoned"; agent: ActiveAgent };
 
 export class ChromeRuntime {
   private readonly client: ChromeRuntimeClient;
@@ -147,11 +147,47 @@ export class ChromeRuntime {
     return this.queue.enqueue(() => this.finishAgent());
   }
 
+  /**
+   * Explicit user-invoked restart (/codex-computer restart): finish the
+   * current run (cleanup + child stop), then re-arm the same OMP run with a
+   * fresh browser identity. This intentionally clears poison — a human chose
+   * to restart; the model still never gets an automatic retry of an
+   * uncertain action.
+   */
+  restart(): Promise<void> {
+    return this.queue.enqueue(async () => {
+      const agent = this.state.kind === "active" || this.state.kind === "poisoned"
+        ? this.state.agent
+        : undefined;
+      try {
+        await this.finishAgent();
+      } catch {
+        // Teardown failure must not block the explicit restart; finishAgent
+        // has already invalidated all state before rethrowing.
+      }
+      if (!agent) return;
+      this.state = {
+        kind: "active",
+        agent: {
+          cwd: agent.cwd,
+          ompSessionId: agent.ompSessionId,
+          identity: {
+            sessionId: randomUUID(),
+            turnId: randomUUID(),
+          },
+          prepared: false,
+          dispatched: false,
+        },
+      };
+    });
+  }
+
   private run(ctx: ExtensionContext, operation: ChromeOperation, signal?: AbortSignal): Promise<ChromeResult> {
     return this.queue.enqueue(async () => {
       const agent = this.requireActiveAgent(ctx);
       if (signal?.aborted) throw createAbortError();
 
+      let dispatched = false;
       try {
         const initialize = await waitForAbort(this.initialize(signal), signal);
         if (signal?.aborted) throw createAbortError();
@@ -164,23 +200,28 @@ export class ChromeRuntime {
           agent.prepared = true;
         }
 
-        agent.dispatched = true;
         const result = await waitForAbort(
-          this.transport.execute(agent.cwd, agent.identity, operation, signal),
+          this.transport.execute(agent.cwd, agent.identity, operation, signal, () => {
+            agent.dispatched = true;
+            dispatched = true;
+          }),
           signal,
         );
         if (signal?.aborted) throw createAbortError();
         if (!this.client.isRunning()) throw new Error("Chrome app-server is unavailable");
         return result;
       } catch (error) {
-        // Benign transport errors are proven side-effect free; anything else
+        // Nothing dispatched for THIS operation is proven side-effect free:
+        // aborts during initialize/prepare, bootstrap unavailability, and
+        // pre-send rejections leave the run usable. Once dispatched, only
+        // benign transport errors are proven side-effect free; anything else
         // (unknown errors, uncertain dispatch outcomes) poisons the run.
-        const benign = error instanceof ChromeTransportError && !error.poisons;
+        const benign = !dispatched || (error instanceof ChromeTransportError && !error.poisons);
         if (!benign) await this.poison(agent);
         if (signal?.aborted) throw createAbortError();
         throw error;
       }
-    });
+    }, signal);
   }
 
   private requireActiveAgent(ctx: ExtensionContext): ActiveAgent {
@@ -219,7 +260,9 @@ export class ChromeRuntime {
       signal,
     ).catch((error: unknown) => {
       if (this.initializePromise === initializePromise) this.initializePromise = undefined;
-      throw error;
+      // Raw app-server spawn/handshake errors must not reach the model verbatim.
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      throw new ChromeTransportError("unavailable");
     });
 
     this.initializePromise = initializePromise;
@@ -228,7 +271,7 @@ export class ChromeRuntime {
 
   private async poison(agent: ActiveAgent): Promise<void> {
     if (this.state.kind === "active" && this.state.agent === agent) {
-      this.state = { kind: "poisoned" };
+      this.state = { kind: "poisoned", agent };
     }
     this.initializePromise = undefined;
 
