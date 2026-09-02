@@ -15,3 +15,6 @@ coverage/
 # Editor state
 .idea/
 .vscode/
+
+# Local agent state
+.omo/
