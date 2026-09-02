@@ -6,7 +6,13 @@ export const CHROME_TRUST_ENV_VAR = "OMP_CODEX_CHROME_TRUST";
 // The built-in allowlist only grows through the CONTRIBUTING review process:
 // app-server protocol review against the experimental API this extension uses,
 // focused compatibility tests, and a live open/action/close smoke.
-export const BUILT_IN_TRUSTED_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(["0.149.0"]);
+// 0.151.0: reviewed 2026-09-02 against the exact 0.149.0 schema. Request and
+// response root schemas, JSON-RPC envelopes, and the elicitation request for
+// every used method are identical; 11 transitively referenced definitions
+// changed, all additively (optional `McpServerStatus.runtimeStatus` and
+// `Thread.historyMode`; the rest under the never-read `Thread.turns`). Every
+// field this extension consumes is unchanged.
+export const BUILT_IN_TRUSTED_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(["0.149.0", "0.151.0"]);
 
 export const SAFE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 
