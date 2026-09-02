@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHROME_CLIENT_CONTRACT_MARKERS } from "../src/chrome-capabilities";
 import { checkChromeStatus, formatChromeStatus } from "../src/chrome-status";
+import { BUILT_IN_TRUSTED_APP_SERVER_VERSIONS } from "../src/chrome-trust";
 import type {
   InitializeResponse,
   McpServerStatus,
@@ -166,7 +167,7 @@ describe("checkChromeStatus", () => {
       status: "ready",
       reason: "ready",
       message: "Chrome transport compatibility is verified; connection is checked when chrome_open runs.",
-      trustedAppServerVersions: [APP_SERVER_VERSION],
+      trustedAppServerVersions: [...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS],
       observedPluginVersions: [CHROME_VERSION],
       observedAppServerVersion: APP_SERVER_VERSION,
     });
@@ -198,12 +199,14 @@ describe("checkChromeStatus", () => {
     expect(status).toMatchObject({
       status: "unavailable",
       reason: "unsupported_app_server_version",
-      trustedAppServerVersions: [APP_SERVER_VERSION],
+      trustedAppServerVersions: [...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS],
       observedPluginVersions: [CHROME_VERSION],
       observedAppServerVersion: "0.150.0",
     });
     expect(status.message).toContain("/codex-computer trust");
-    expect(formatted).toContain("Trusted Codex app-server versions: 0.149.0");
+    expect(formatted).toContain(
+      `Trusted Codex app-server versions: ${BUILT_IN_TRUSTED_APP_SERVER_VERSIONS.join(", ")}`,
+    );
     expect(formatted).toContain("Observed Codex app-server version: 0.150.0");
     expect(formatted).toContain(`Observed Chrome plugin versions: ${CHROME_VERSION}`);
     expect(formatted).not.toContain(pluginRoot);
@@ -220,14 +223,14 @@ describe("checkChromeStatus", () => {
       join(configHome, "omp-codex-computer", "trusted-app-servers.json"),
       JSON.stringify({ appServerVersions: ["0.150.0"] }),
     );
-    vi.stubEnv("OMP_CODEX_CHROME_TRUST", "0.151.0");
+    vi.stubEnv("OMP_CODEX_CHROME_TRUST", "0.152.0");
     mockState.initializeResponse = initialize("0.150.0");
 
     const status = await checkChromeStatus("/private/project-cwd");
 
     expect(status).toMatchObject({
       status: "ready",
-      trustedAppServerVersions: [APP_SERVER_VERSION, "0.150.0", "0.151.0"],
+      trustedAppServerVersions: [...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS, "0.150.0", "0.152.0"],
       observedAppServerVersion: "0.150.0",
     });
   });
@@ -280,7 +283,7 @@ describe("checkChromeStatus", () => {
       status: "unavailable",
       reason: "check_failed",
       message: "Chrome status check failed while talking to Codex app-server.",
-      trustedAppServerVersions: [APP_SERVER_VERSION],
+      trustedAppServerVersions: [...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS],
       observedPluginVersions: [],
     });
     expect(JSON.stringify(status)).not.toContain("initialize-secret");

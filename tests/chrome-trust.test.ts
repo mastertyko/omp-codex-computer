@@ -90,8 +90,8 @@ describe("getTrustedAppServerVersions", () => {
   it("merges built-in, persisted, and env versions with validation and dedupe", () => {
     expect(getTrustedAppServerVersions({}, [])).toEqual([...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS]);
     expect(getTrustedAppServerVersions(
-      { OMP_CODEX_CHROME_TRUST: " 0.151.0 ,0.149.0, plugin@0.152.0 , bad version ,," },
+      { OMP_CODEX_CHROME_TRUST: " 0.152.0 ,0.149.0, plugin@0.153.0 , bad version ,," },
       ["0.150.0", "/etc/passwd"],
-    )).toEqual(["0.149.0", "0.150.0", "0.151.0"]);
+    )).toEqual([...BUILT_IN_TRUSTED_APP_SERVER_VERSIONS, "0.150.0", "0.152.0"]);
   });
 });
