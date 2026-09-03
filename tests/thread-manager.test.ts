@@ -58,6 +58,36 @@ describe("CodexThreadManager", () => {
     expect(client.calls).toHaveLength(1);
   });
 
+  it("keeps only id and sessionId from the app-server 0.151.0 thread/start shape", async () => {
+    // Mirrors a live 0.151.0 response: additive `thread.historyMode` plus the
+    // metadata this extension never reads.
+    const client = {
+      async request<T>(): Promise<T> {
+        return {
+          thread: {
+            id: "thread-151",
+            sessionId: "session-151",
+            status: { type: "idle" },
+            cwd: "/tmp/project",
+            ephemeral: true,
+            historyMode: "legacy",
+            cliVersion: "0.151.0",
+            projectId: null,
+            source: "vscode",
+            turns: [],
+          },
+          model: "test",
+          modelProvider: "test",
+          approvalPolicy: "never",
+          instructionSources: [],
+        } as T;
+      },
+    };
+    const manager = new CodexThreadManager(client);
+
+    await expect(manager.getThread("/tmp/project")).resolves.toEqual({ id: "thread-151", sessionId: "session-151" });
+  });
+
   it("caches thread ids per cwd and reuses them when switching back", async () => {
     const client = new FakeClient();
     const manager = new CodexThreadManager(client as never);

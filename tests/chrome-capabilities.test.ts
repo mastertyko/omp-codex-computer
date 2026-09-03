@@ -20,6 +20,8 @@ import type {
 
 const CHROME_VERSION = "26.818.31338";
 const APP_SERVER_VERSION = "0.149.0";
+const NEWER_APP_SERVER_VERSION = "0.151.0";
+const UNTRUSTED_APP_SERVER_VERSION = "0.152.0";
 const CLIENT_FIXTURE = [
   "export function setupBrowserRuntime() {}",
   ...CHROME_CLIENT_CONTRACT_MARKERS.map((marker) => `// ${marker}`),
@@ -127,8 +129,45 @@ afterEach(async () => {
 
 describe("evaluateChromeCapabilities", () => {
   it("pins the built-in trusted app-server versions", () => {
-    expect(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS).toEqual([APP_SERVER_VERSION]);
+    expect(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS).toEqual([APP_SERVER_VERSION, NEWER_APP_SERVER_VERSION]);
     expect(Object.isFrozen(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS)).toBe(true);
+  });
+
+  it.each(BUILT_IN_TRUSTED_APP_SERVER_VERSIONS)(
+    "accepts built-in app-server version %s without env or persisted trust",
+    async (appServerVersion) => {
+      const tree = await createPluginTree();
+
+      const result = await evaluate(initialize(appServerVersion), pluginList(tree.root), mcp(), {});
+
+      expect(result).toMatchObject({ status: "ready", appServerVersion });
+    },
+  );
+
+  it("fails closed on an app-server version outside the built-in allowlist", async () => {
+    const tree = await createPluginTree();
+
+    const result = await evaluate(initialize(UNTRUSTED_APP_SERVER_VERSION), pluginList(tree.root), mcp(), {});
+
+    expectUnavailable(result, "unsupported_app_server_version");
+  });
+
+  it("accepts the app-server 0.151.0 mcpServerStatus/list shape", async () => {
+    // Mirrors a live 0.151.0 `node_repl` entry: additive `runtimeStatus`
+    // (nullable) plus `pluginId`/`serverInfo` and the current tool set. The
+    // intersection keeps `McpServerStatus` as the consumed subset while the
+    // fixture carries the upstream fields this gate must ignore.
+    const tree = await createPluginTree();
+    const nodeRepl: McpServerStatus & { runtimeStatus: null; pluginId: null; serverInfo: Record<string, unknown> } = {
+      ...server("node_repl", ["js", "js_add_node_module_dir", "js_reset", "turn_ended"]),
+      runtimeStatus: null,
+      pluginId: null,
+      serverInfo: { name: "rmcp", title: null, version: "1.5.0", description: null, icons: null, websiteUrl: null },
+    };
+
+    const result = await evaluate(initialize(NEWER_APP_SERVER_VERSION), pluginList(tree.root), mcp([nodeRepl]), {});
+
+    expect(result).toMatchObject({ status: "ready", appServerVersion: NEWER_APP_SERVER_VERSION });
   });
 
   it.each([CHROME_VERSION, "27.101.55555"])(
@@ -166,10 +205,16 @@ describe("evaluateChromeCapabilities", () => {
   it("trusts probe-only extra versions without widening env or persisted trust", async () => {
     const tree = await createPluginTree();
 
-    const withExtra = await evaluate(initialize("0.151.0"), pluginList(tree.root), mcp(), {}, ["0.151.0"]);
-    expect(withExtra).toMatchObject({ status: "ready", appServerVersion: "0.151.0" });
+    const withExtra = await evaluate(
+      initialize(UNTRUSTED_APP_SERVER_VERSION),
+      pluginList(tree.root),
+      mcp(),
+      {},
+      [UNTRUSTED_APP_SERVER_VERSION],
+    );
+    expect(withExtra).toMatchObject({ status: "ready", appServerVersion: UNTRUSTED_APP_SERVER_VERSION });
 
-    const withoutExtra = await evaluate(initialize("0.151.0"), pluginList(tree.root), mcp(), {});
+    const withoutExtra = await evaluate(initialize(UNTRUSTED_APP_SERVER_VERSION), pluginList(tree.root), mcp(), {});
     expectUnavailable(withoutExtra, "unsupported_app_server_version");
   });
 

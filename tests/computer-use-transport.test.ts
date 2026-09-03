@@ -237,6 +237,29 @@ describe("ComputerUseTransport", () => {
     expect(decodeSkyPayload(programFrom(dispatch))).toEqual({ tool: "list_apps", args: {} });
   });
 
+  it("selects Sky from the app-server 0.151.0 mcpServerStatus/list shape", async () => {
+    // Mirrors a live 0.151.0 `node_repl` entry: additive `runtimeStatus`
+    // (nullable) plus `pluginId`/`serverInfo` and the current tool set. The
+    // intersection keeps `McpServerStatus` as the consumed subset while the
+    // fixture carries the upstream fields route selection must ignore.
+    const client = new FakeClient();
+    const nodeRepl: McpServerStatus & { runtimeStatus: null; pluginId: null; serverInfo: Record<string, unknown> } = {
+      ...server("node_repl", ["js", "js_add_node_module_dir", "js_reset", "turn_ended"]),
+      authStatus: "unsupported",
+      runtimeStatus: null,
+      pluginId: null,
+      serverInfo: { name: "rmcp", title: null, version: "1.5.0", description: null, icons: null, websiteUrl: null },
+    };
+    client.mcpResponse = { data: [nodeRepl] };
+    client.toolResponses.push(skySuccess("bootstrap"));
+    const transport = new ComputerUseTransport(client, new FakeThreads());
+
+    await expect(transport.prepare("/work")).resolves.toBe("sky");
+
+    const [bootstrap] = toolRequests(client);
+    expect(bootstrap?.params).toMatchObject({ server: "node_repl", tool: "js" });
+  });
+
   it("starts plugin and MCP discovery concurrently", async () => {
     const client = new FakeClient();
     const pluginDiscovery = Promise.withResolvers<PluginListResponse>();

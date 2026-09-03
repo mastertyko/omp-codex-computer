@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 export const CHROME_TRUST_ENV_VAR = "OMP_CODEX_CHROME_TRUST";
@@ -6,7 +6,13 @@ export const CHROME_TRUST_ENV_VAR = "OMP_CODEX_CHROME_TRUST";
 // The built-in allowlist only grows through the CONTRIBUTING review process:
 // app-server protocol review against the experimental API this extension uses,
 // focused compatibility tests, and a live open/action/close smoke.
-export const BUILT_IN_TRUSTED_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(["0.149.0"]);
+// 0.151.0: reviewed 2026-09-02 against the exact 0.149.0 schema. Request and
+// response root schemas, JSON-RPC envelopes, and the elicitation request for
+// every used method are identical; 11 transitively referenced definitions
+// changed, all additively (optional `McpServerStatus.runtimeStatus` and
+// `Thread.historyMode`; the rest under the never-read `Thread.turns`). Every
+// field this extension consumes is unchanged.
+export const BUILT_IN_TRUSTED_APP_SERVER_VERSIONS: readonly string[] = Object.freeze(["0.149.0", "0.151.0"]);
 
 export const SAFE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 
@@ -64,8 +70,7 @@ export async function persistTrustedAppServerVersion(
 
   const current = await loadPersistedAppServerVersions(env);
   const next = [...new Set([...current, version])];
-  await mkdir(join(path, ".."), { recursive: true });
-  await writeFile(path, `${JSON.stringify({ appServerVersions: next }, null, 2)}\n`, "utf8");
+  await writeTrustFileAtomically(path, next);
   return path;
 }
 
@@ -79,7 +84,24 @@ export async function removePersistedAppServerVersion(
   const current = await loadPersistedAppServerVersions(env);
   const next = current.filter((entry) => entry !== version);
   if (next.length === current.length) return;
-  await writeFile(path, `${JSON.stringify({ appServerVersions: next }, null, 2)}\n`, "utf8");
+  await writeTrustFileAtomically(path, next);
+}
+
+/**
+ * Write via temp file + rename so concurrent OMP sessions never observe a
+ * torn trust file. A concurrent lost update degrades to a re-probe, never to
+ * malformed JSON granting or corrupting trust.
+ */
+async function writeTrustFileAtomically(path: string, versions: string[]): Promise<void> {
+  await mkdir(join(path, ".."), { recursive: true });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({ appServerVersions: versions }, null, 2)}\n`, "utf8");
+  try {
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 /** Delete the persisted trust store. Returns the removed path, if any. */
