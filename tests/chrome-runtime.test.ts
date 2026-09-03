@@ -38,6 +38,7 @@ interface ExecuteCall {
 
 class FakeClient {
   running = false;
+  initialized = false;
   initializeCalls = 0;
   stopCalls = 0;
   serverRequestHandler: ServerRequestHandler | undefined;
@@ -62,10 +63,12 @@ class FakeClient {
     signal?: AbortSignal,
   ): Promise<TResult> {
     if (signal?.aborted) throw abortError();
+    if (this.initialized) throw new Error("Already initialized");
     if (this.initializeImpl) await this.initializeImpl();
     this.initializeCalls += 1;
     this.events.push(`${method}:${notificationMethod}`);
     this.running = true;
+    this.initialized = true;
     return INITIALIZE_RESPONSE as TResult;
   }
 
@@ -73,6 +76,7 @@ class FakeClient {
     this.stopCalls += 1;
     this.events.push("stop");
     this.running = false;
+    this.initialized = false;
   }
 }
 
@@ -390,7 +394,7 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     await runtime.endAgent();
   });
 
-  it("poisons the agent, stops the child, and never retries a failed dispatch", async () => {
+  it("keeps a poisoned run unavailable across same-context continuation until restart", async () => {
     const { client, runtime, threads, transport } = createHarness();
     const ctx = createContext();
     const failure = new Error("safe transport failure");
@@ -412,10 +416,12 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     await expect(runtime.observe(ctx)).rejects.toThrow("remainder of this agent run");
     expect(transport.executeCalls).toHaveLength(1);
 
-    // The poisoned run stays unavailable, but the next agent_start is a new
-    // run and gets a fresh start with a new identity.
     transport.executeImpl = async () => RESULT;
     await runtime.beginAgent(ctx);
+    await expect(runtime.open(ctx)).rejects.toThrow("remainder of this agent run");
+    expect(transport.executeCalls).toHaveLength(1);
+
+    await runtime.restart();
     await runtime.open(ctx);
     expect(transport.executeCalls).toHaveLength(2);
     expect(transport.executeCalls[1]?.identity).not.toEqual(transport.executeCalls[0]?.identity);
@@ -534,25 +540,27 @@ describe("ChromeRuntime cleanup and invalidation", () => {
     await runtime.endAgent();
   });
 
-  it("keeps the run usable when aborted during initialize", async () => {
+  it("restarts the child when aborted after initialize was accepted", async () => {
     const { client, runtime, transport } = createHarness();
     const ctx = createContext();
     const controller = new AbortController();
-    const initializeStarted = Promise.withResolvers<void>();
+    const initializeAccepted = Promise.withResolvers<void>();
     client.initializeImpl = () => {
-      initializeStarted.resolve();
+      client.running = true;
+      client.initialized = true;
+      initializeAccepted.resolve();
       const rejection = Promise.withResolvers<void>();
-      // The real initialize request rejects when its signal aborts.
       controller.signal.addEventListener("abort", () => rejection.reject(abortError()), { once: true });
       return rejection.promise;
     };
 
     await runtime.beginAgent(ctx);
     const operation = runtime.open(ctx, undefined, controller.signal);
-    await initializeStarted.promise;
+    await initializeAccepted.promise;
     controller.abort();
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });
-    expect(client.stopCalls).toBe(0);
+    expect(client.stopCalls).toBe(1);
+    expect(client.running).toBe(false);
     expect(transport.executeCalls).toHaveLength(0);
 
     client.initializeImpl = undefined;

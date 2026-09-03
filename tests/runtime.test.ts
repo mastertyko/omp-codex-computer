@@ -381,11 +381,13 @@ describe("ComputerUseRuntime lifecycle", () => {
 
   it("rejects stale queued calls after shutdown instead of resurrecting the child", async () => {
     const firstResult = Promise.withResolvers<{ content: [] }>();
+    const firstStarted = Promise.withResolvers<void>();
     const backend = {
       reset: vi.fn(),
       calls: [] as string[],
       callTool(_cwd: string, tool: string) {
         this.calls.push(tool);
+        firstStarted.resolve();
         return firstResult.promise;
       },
     };
@@ -406,7 +408,7 @@ describe("ComputerUseRuntime lifecycle", () => {
     runtimeInternals.backend = backend;
 
     const first = runtime.callTool(createContext("/tmp/project", async () => true), "inspect", { app: "First" });
-    await flushPromises();
+    await firstStarted.promise;
     const second = runtime.callTool(createContext("/tmp/project", async () => true), "inspect", { app: "Second" });
     const shutdown = runtime.shutdown();
 

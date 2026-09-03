@@ -97,10 +97,10 @@ export class ChromeRuntime {
       // todo/plan continuations, ...) without ordering guarantees: the next
       // run's agent_start can arrive before -- or without -- the previous
       // run's agent_end. A repeated start for the same OMP session and cwd is
-      // the same logical run continuing, so the active browser session (and
-      // its opaque identity) is kept. Any other non-idle state is a stale or
-      // invalidated run: finish it, then start fresh.
-      if (this.state.kind === "active") {
+      // the same logical run continuing, so its state and opaque identity are
+      // kept. Any other non-idle state is a stale or invalidated run: finish
+      // it, then start fresh.
+      if (this.state.kind === "active" || this.state.kind === "poisoned") {
         const { agent } = this.state;
         if (agent.ompSessionId === sessionId && agent.cwd === cwd) return;
         await this.finishStaleAgent();
@@ -258,8 +258,9 @@ export class ChromeRuntime {
       undefined,
       REQUEST_TIMEOUT_MS,
       signal,
-    ).catch((error: unknown) => {
+    ).catch(async (error: unknown) => {
       if (this.initializePromise === initializePromise) this.initializePromise = undefined;
+      if (this.client.isRunning()) await this.client.stop();
       // Raw app-server spawn/handshake errors must not reach the model verbatim.
       if (error instanceof Error && error.name === "AbortError") throw error;
       throw new ChromeTransportError("unavailable");
